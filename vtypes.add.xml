@@ -1,0 +1,5 @@
+<additional>
+    <vType id="passenger_car" vClass="passenger" guiShape="passenger/sedan" color="red" length="4.5" width="1.8" maxSpeed="20.0" accel="2.6" decel="4.5" sigma="0.5"/>
+    <vType id="bicycle" vClass="bicycle" guiShape="bicycle" color="yellow" length="1.6" width="0.6" maxSpeed="5.0" accel="1.2" decel="3.0"/>
+    <vType id="pedestrian" vClass="pedestrian" guiShape="pedestrian" color="blue" length="0.5" width="0.5" maxSpeed="1.5" accel="1.5" decel="2.0"/>
+</additional>

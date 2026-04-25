@@ -1,0 +1,6 @@
+<viewsettings>
+    <scheme name="real world"/>
+    <viewport zoom="200" x="0" y="-150" z="100"/>
+    <delay value="100"/>
+    <osg_view light1="1" light2="1" skydome="1" materials="1"/>
+</viewsettings>

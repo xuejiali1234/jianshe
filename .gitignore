@@ -1,0 +1,52 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+*.env
+
+# Runtime and generated SUMO data
+data/raw/*
+data/processed/*
+data/datasets/*
+data/archive/
+
+# Keep lightweight data docs/placeholders
+!data/README.md
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/datasets/.gitkeep
+
+# Trained model artifacts and generated reports
+models/artifacts/
+*.pt
+*.pth
+*.joblib
+*.pkl
+reports/figures/
+reports/*.csv
+reports/*.json
+
+# Keep lightweight docs/placeholders
+!models/README.md
+!reports/README.md
+
+# Logs and local runtime output
+*.log
+*.tmp
+*.bak
+*.sqlite
+*.db
+
+# Editor/system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+websockets
+pydantic
+numpy
+pandas
+scipy
+scikit-learn
+statsmodels
+matplotlib
+seaborn
+tqdm
+joblib
+xgboost
+lightgbm
+pyproj
+httpx

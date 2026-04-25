@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SUMO &#22478;&#24066;&#20132;&#36890;&#39044;&#27979;&#31995;&#32479;</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.1/echarts.min.js"></script>
+    <script>
+        if (typeof echarts === 'undefined') {
+            document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"><\/script>');
+        }
+    </script>
+    <script>
+        window._AMapSecurityConfig = { securityJsCode: '2bb6456efcb6d90f70a572daaa79f181' };
+    </script>
+    <script src="https://webapi.amap.com/maps?v=2.0&key=371b94402933c476d078548eb4bc1f0d"></script>
+    <script>
+        window.addEventListener('load', function () {
+            if (typeof AMap === 'undefined') {
+                console.error('Critical Error: AMap is not loaded. Check network or keys.');
+            } else {
+                console.log('AMap loaded successfully. Version:', AMap.version);
+            }
+        });
+    </script>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #050510;
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        }
+
+        #mapContainer {
+            position: absolute;
+            inset: 0;
+            z-index: 1;
+        }
+
+        .hud-overlay {
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 16px;
+            box-sizing: border-box;
+            pointer-events: none;
+        }
+
+        .header {
+            text-align: center;
+            color: #0df;
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: 4px;
+            padding-top: 8px;
+        }
+
+        .edge-label {
+            margin-top: 8px;
+            font-size: 14px;
+            color: #fff;
+            text-shadow: 0 0 5px #0df;
+        }
+
+        .panel-shell {
+            flex: 1;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 16px;
+            margin-top: 24px;
+            padding-bottom: 108px;
+            box-sizing: border-box;
+        }
+
+        .panel {
+            background: rgba(20, 30, 48, 0.84);
+            border: 1px solid rgba(31, 130, 192, 0.9);
+            box-shadow: 0 0 10px rgba(31, 130, 192, 0.35);
+            border-radius: 6px;
+            color: #eafcff;
+            backdrop-filter: blur(5px);
+            pointer-events: auto;
+            box-sizing: border-box;
+        }
+
+        .overview-panel {
+            width: 320px;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .right-rail {
+            margin-left: auto;
+            width: 320px;
+            display: flex;
+            flex-direction: column;
+            align-items: stretch;
+            gap: 12px;
+            pointer-events: none;
+        }
+
+        .prediction-panel {
+            width: 320px;
+            min-height: 0;
+            padding: 12px;
+        }
+
+        .panel-header-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .panel-title {
+            margin: 0;
+            font-size: 16px;
+            color: #0df;
+            letter-spacing: 1px;
+        }
+
+        .model-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 72px;
+            padding: 4px 8px;
+            border: 1px solid rgba(13, 223, 255, 0.65);
+            border-radius: 999px;
+            background: rgba(13, 223, 255, 0.1);
+            color: #dffcff;
+            font-size: 11px;
+            line-height: 1;
+            font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .mode-switch {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .mode-switch-btn {
+            padding: 6px 8px;
+            background: rgba(7, 12, 22, 0.78);
+            color: #cfe8ff;
+            border: 1px solid rgba(31, 130, 192, 0.4);
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .mode-switch-btn.active {
+            background: rgba(13, 223, 255, 0.14);
+            border-color: rgba(13, 223, 255, 0.78);
+            color: #ffffff;
+        }
+
+        .control-block {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+        }
+
+        .control-label {
+            color: #8cc8ff;
+            font-size: 11px;
+            letter-spacing: 1px;
+        }
+
+        .select-control {
+            width: 100%;
+            background: rgba(5, 5, 16, 0.92);
+            color: #eafcff;
+            border: 1px solid #1f82c0;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 12px;
+            font-family: 'Courier New', Consolas, monospace;
+            box-sizing: border-box;
+        }
+
+        .prediction-meta {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .meta-item {
+            padding: 8px 10px;
+            background: rgba(7, 12, 22, 0.7);
+            border: 1px solid rgba(31, 130, 192, 0.35);
+            border-radius: 4px;
+            min-width: 0;
+        }
+
+        .meta-key {
+            display: block;
+            margin-bottom: 4px;
+            color: #8cc8ff;
+            font-size: 10px;
+            letter-spacing: 1px;
+        }
+
+        .meta-value {
+            display: block;
+            color: #fff;
+            font-size: 13px;
+            font-family: 'Courier New', Consolas, monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .prediction-mini-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .prediction-view {
+            display: none;
+        }
+
+        .prediction-view.active {
+            display: block;
+        }
+
+        .prediction-mini-card {
+            padding: 8px 9px 7px;
+            background: rgba(7, 12, 22, 0.58);
+            border: 1px solid rgba(31, 130, 192, 0.28);
+            border-radius: 4px;
+        }
+
+        .prediction-mini-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .prediction-mini-title {
+            margin: 0;
+            color: #8cc8ff;
+            font-size: 11px;
+            letter-spacing: 1px;
+        }
+
+        .prediction-mini-value {
+            color: #ffffff;
+            font-size: 12px;
+            font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .prediction-mini-chart {
+            width: 100%;
+            height: 68px;
+        }
+
+        .compare-delta-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+            margin-bottom: 10px;
+        }
+
+        .delta-card {
+            padding: 7px 8px;
+            background: rgba(7, 12, 22, 0.72);
+            border: 1px solid rgba(255, 125, 127, 0.24);
+            border-radius: 4px;
+        }
+
+        .delta-label {
+            display: block;
+            margin-bottom: 4px;
+            color: #ffb0b2;
+            font-size: 10px;
+            letter-spacing: 1px;
+        }
+
+        .delta-value {
+            display: block;
+            color: #fff;
+            font-size: 12px;
+            font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .metric {
+            margin-bottom: 10px;
+        }
+
+        .metric-title {
+            font-size: 14px;
+            color: #7df;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+            opacity: 0.85;
+        }
+
+        .metric-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #fff;
+            display: flex;
+            align-items: baseline;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .metric-unit {
+            font-size: 12px;
+            margin-left: 6px;
+            color: #7df;
+            font-variant-numeric: normal;
+        }
+
+        .chart-container {
+            width: 100%;
+            min-height: 200px;
+            margin-top: 14px;
+        }
+
+        .progress-container {
+            width: 100%;
+            height: 8px;
+            background: rgba(20, 30, 48, 0.8);
+            border: 1px solid #1f82c0;
+            margin-top: 15px;
+            border-radius: 4px;
+            overflow: hidden;
+            pointer-events: auto;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #1f82c0, #0df);
+            box-shadow: 0 0 10px #0df;
+            transition: width 0.1s linear;
+        }
+
+        .incident-dock {
+            position: absolute;
+            left: 50%;
+            bottom: 16px;
+            transform: translateX(-50%);
+            width: min(620px, calc(100% - 420px));
+            min-width: 420px;
+            padding: 10px 12px;
+            background: rgba(14, 19, 31, 0.78);
+            border: 1px solid rgba(255, 77, 79, 0.55);
+            box-shadow: 0 0 10px rgba(255, 77, 79, 0.18);
+            border-radius: 6px;
+            backdrop-filter: blur(6px);
+            pointer-events: auto;
+            box-sizing: border-box;
+        }
+
+        .incident-dock-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .incident-dock-title {
+            margin: 0;
+            font-size: 14px;
+            color: #ff7d7f;
+            letter-spacing: 1px;
+        }
+
+        .incident-dock-meta {
+            color: #ffd5d6;
+            font-size: 11px;
+            font-family: 'Courier New', Consolas, monospace;
+        }
+
+        #incidentList {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 88px;
+            overflow-y: auto;
+            padding-right: 4px;
+        }
+
+        #incidentList::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        #incidentList::-webkit-scrollbar-thumb {
+            background: rgba(255, 77, 79, 0.35);
+            border-radius: 999px;
+        }
+
+        @media (max-width: 1180px) {
+            .panel-shell {
+                padding-bottom: 132px;
+            }
+
+            .incident-dock {
+                width: min(560px, calc(100% - 40px));
+                min-width: 0;
+            }
+        }
+
+        @media (max-width: 960px) {
+            .panel-shell {
+                flex-direction: column;
+                align-items: stretch;
+                padding-bottom: 160px;
+            }
+
+            .overview-panel,
+            .right-rail,
+            .prediction-panel {
+                width: min(340px, 100%);
+            }
+
+            .right-rail {
+                margin-left: 0;
+            }
+
+            .incident-dock {
+                width: calc(100% - 32px);
+                left: 16px;
+                transform: none;
+                min-width: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="mapContainer"></div>
+    <div class="hud-overlay">
+        <div class="header" id="systemStatus">
+            &#22478;&#24066;&#20132;&#36890;&#25968;&#23383;&#23402;&#29983;&#31995;&#32479;
+            <div class="edge-label" id="currentEdgeLabel">&#30417;&#27979;&#33539;&#22260;&#65306;&#20840;&#36335;&#32593;</div>
+            <button id="btnGlobalScope" style="margin-top: 10px; padding: 5px 15px; background: rgba(20, 30, 48, 0.85); border: 1px solid #0df; color: #0df; cursor: pointer; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; border-radius: 4px; pointer-events: auto; letter-spacing: 2px;">&#24674;&#22797;&#20840;&#23616;&#35270;&#22270;</button>
+            <div style="display: flex; justify-content: space-between; font-size: 13px; color: #a0cfff; margin-top: 15px; width: 60%; margin-left: 20%; pointer-events: auto; font-variant-numeric: tabular-nums;">
+                <span id="timeStart">2026-04-17 08:00:00</span>
+                <span id="timeCurrent" style="display: inline-block; color: #fff; font-weight: bold; text-shadow: 0 0 5px #0df; text-align: center; width: 170px;">2026-04-17 08:00:00</span>
+                <span id="timeEnd">2026-04-17 09:00:00</span>
+            </div>
+            <div class="progress-container" style="margin-top: 5px; width: 60%; margin-left: 20%;">
+                <div class="progress-fill" id="progressBar"></div>
+            </div>
+        </div>
+
+        <div class="panel-shell">
+            <div class="panel overview-panel">
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-title">&#23454;&#26102;&#27969;&#37327;</div>
+                        <div class="metric-value" id="valFlow"><span style="display:inline-block; width: 60px; font-family: 'Courier New', Consolas, monospace; text-align: right;">0</span><span class="metric-unit">&#36710;</span></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-title">&#24179;&#22343;&#36895;&#24230;</div>
+                        <div class="metric-value" id="valSpeed"><span style="display:inline-block; width: 60px; font-family: 'Courier New', Consolas, monospace; text-align: right;">0.0</span><span class="metric-unit">km/h</span></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-title">&#25490;&#38431;&#38271;&#24230;</div>
+                        <div class="metric-value" id="valQueue"><span style="display:inline-block; width: 60px; font-family: 'Courier New', Consolas, monospace; text-align: right;">0</span><span class="metric-unit">&#36710;</span></div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-title">CO2</div>
+                        <div class="metric-value" id="valCO2"><span style="display:inline-block; width: 60px; font-family: 'Courier New', Consolas, monospace; text-align: right;">0.0</span><span class="metric-unit">mg/s</span></div>
+                    </div>
+                </div>
+                <div id="speedChart" class="chart-container"></div>
+            </div>
+
+            <aside class="right-rail">
+                <div id="transformerForecastPanel" class="panel prediction-panel">
+                    <div class="panel-header-row">
+                        <h3 class="panel-title">&#39044;&#27979;&#38754;&#26495;</h3>
+                        <span id="predictionActiveBadge" class="model-chip">--</span>
+                    </div>
+
+                    <div class="mode-switch">
+                        <button id="predictionModeRealtime" class="mode-switch-btn active" type="button">&#23454;&#26102;&#39044;&#27979;</button>
+                        <button id="predictionModeCompare" class="mode-switch-btn" type="button">&#20107;&#25925;&#23545;&#27604;</button>
+                    </div>
+
+                    <div class="control-grid">
+                        <label class="control-block">
+                            <span class="control-label">&#27169;&#22411;</span>
+                            <select id="predictionModelSelect" class="select-control"></select>
+                        </label>
+                        <label class="control-block">
+                            <span class="control-label">&#36335;&#27573;</span>
+                            <select id="predictionEdgeSelect" class="select-control"></select>
+                        </label>
+                    </div>
+
+                    <div id="scenarioCompareControls" class="control-grid" style="display:none;">
+                        <label class="control-block">
+                            <span class="control-label">&#27491;&#24120; Run</span>
+                            <select id="baselineRunSelect" class="select-control"></select>
+                        </label>
+                        <label class="control-block">
+                            <span class="control-label">&#20107;&#25925; Run</span>
+                            <select id="incidentRunSelect" class="select-control"></select>
+                        </label>
+                    </div>
+
+                    <div id="realtimePredictionView" class="prediction-view active">
+                        <div class="prediction-meta">
+                            <div class="meta-item">
+                                <span class="meta-key">&#24403;&#21069;&#27169;&#22411;</span>
+                                <span id="predictionActiveModel" class="meta-value">--</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#23454;&#38469;&#36755;&#20986;</span>
+                                <span id="predictionModel" class="meta-value">--</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#21382;&#21490;&#31383;&#21475;</span>
+                                <span id="predictionHistoryWindow" class="meta-value">0 / 12</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#39044;&#27979;&#27493;&#38271;</span>
+                                <span id="predictionHorizon" class="meta-value">--</span>
+                            </div>
+                        </div>
+
+                        <div class="prediction-mini-grid">
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#39044;&#27979;&#27969;&#37327;</h4>
+                                    <span id="predictionFlowLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="predictionFlowChart" class="prediction-mini-chart"></div>
+                            </div>
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#39044;&#27979;&#36895;&#24230;</h4>
+                                    <span id="predictionSpeedLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="predictionSpeedChart" class="prediction-mini-chart"></div>
+                            </div>
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#39044;&#27979;&#25490;&#38431;</h4>
+                                    <span id="predictionQueueLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="predictionQueueChart" class="prediction-mini-chart"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="scenarioCompareView" class="prediction-view">
+                        <div class="prediction-meta">
+                            <div class="meta-item">
+                                <span class="meta-key">&#23545;&#27604;&#27169;&#22411;</span>
+                                <span id="compareModelLabel" class="meta-value">--</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#20107;&#25925;&#31867;&#22411;</span>
+                                <span id="compareIncidentType" class="meta-value">--</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#23545;&#40784;&#26102;&#21051;</span>
+                                <span id="compareAnchorStep" class="meta-value">--</span>
+                            </div>
+                            <div class="meta-item">
+                                <span class="meta-key">&#20107;&#25925;&#36335;&#27573;</span>
+                                <span id="compareAffectedEdges" class="meta-value">--</span>
+                            </div>
+                        </div>
+
+                        <div class="compare-delta-grid">
+                            <div class="delta-card">
+                                <span class="delta-label">&#27969;&#37327;&#24046;&#20540;</span>
+                                <span id="compareFlowDelta" class="delta-value">--</span>
+                            </div>
+                            <div class="delta-card">
+                                <span class="delta-label">&#36895;&#24230;&#24046;&#20540;</span>
+                                <span id="compareSpeedDelta" class="delta-value">--</span>
+                            </div>
+                            <div class="delta-card">
+                                <span class="delta-label">&#25490;&#38431;&#24046;&#20540;</span>
+                                <span id="compareQueueDelta" class="delta-value">--</span>
+                            </div>
+                        </div>
+
+                        <div class="prediction-mini-grid">
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#27969;&#37327;&#23545;&#27604;</h4>
+                                    <span id="compareFlowLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="compareFlowChart" class="prediction-mini-chart"></div>
+                            </div>
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#36895;&#24230;&#23545;&#27604;</h4>
+                                    <span id="compareSpeedLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="compareSpeedChart" class="prediction-mini-chart"></div>
+                            </div>
+                            <div class="prediction-mini-card">
+                                <div class="prediction-mini-head">
+                                    <h4 class="prediction-mini-title">&#25490;&#38431;&#23545;&#27604;</h4>
+                                    <span id="compareQueueLead" class="prediction-mini-value">--</span>
+                                </div>
+                                <div id="compareQueueChart" class="prediction-mini-chart"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <div class="incident-dock">
+            <div class="incident-dock-header">
+                <h3 class="incident-dock-title">&#23454;&#26102;&#39044;&#35686;</h3>
+                <span id="incidentCount" class="incident-dock-meta">0 &#26465;&#28608;&#27963;</span>
+            </div>
+            <div id="incidentList"></div>
+        </div>
+    </div>
+    <script src="/static/js/main.js?v=20260424_incident_compare"></script>
+</body>
+</html>
