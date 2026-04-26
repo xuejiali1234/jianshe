@@ -43,6 +43,8 @@ class ArtifactPredictor:
         self.targets = artifact["targets"]
         self.feature_names = list(artifact.get("feature_names", []))
         self.target_feature_names = list(artifact.get("target_feature_names", []))
+        self.observation_level = str(artifact.get("observation_level", "edge"))
+        self.entity_metadata = dict(artifact.get("entity_metadata", {}))
         self.x_mean = np.asarray(artifact.get("x_mean", artifact.get("mean")), dtype=np.float32)
         self.x_std = np.asarray(artifact.get("x_std", artifact.get("std")), dtype=np.float32)
         self.y_mean = np.asarray(artifact.get("y_mean", artifact.get("mean")), dtype=np.float32)
@@ -50,6 +52,11 @@ class ArtifactPredictor:
         self.history_steps = int(artifact["history_steps"])
         self.horizon_steps = int(artifact["horizon_steps"])
         self._torch_model = None
+        config_level = str(getattr(config, "observation_level", "edge"))
+        if config_level == "movement" and self.observation_level != "movement":
+            raise ValueError(
+                "legacy edge-level artifact is not compatible with movement-level prediction config"
+            )
 
     @classmethod
     def load_best(
@@ -72,13 +79,18 @@ class ArtifactPredictor:
         for filename in ARTIFACT_FILES.values():
             candidates.append(root / filename)
 
+        seen_paths: set[Path] = set()
         for path in candidates:
+            if path in seen_paths:
+                continue
+            seen_paths.add(path)
             if not path.exists():
                 continue
             try:
                 return cls._load_from_path(config, path)
             except Exception as exc:
-                print(f"Failed to load trained predictor {path}: {exc}")
+                if "legacy edge-level artifact" not in str(exc):
+                    print(f"Failed to load trained predictor {path}: {exc}")
         return None
 
     @classmethod
@@ -94,7 +106,12 @@ class ArtifactPredictor:
         path = Path(artifact_dir) / filename
         if not path.exists():
             return None
-        return cls._load_from_path(config, path)
+        try:
+            return cls._load_from_path(config, path)
+        except Exception as exc:
+            if "legacy edge-level artifact" not in str(exc):
+                print(f"Failed to load named predictor {path}: {exc}")
+            return None
 
     @classmethod
     def _load_from_path(
@@ -140,11 +157,15 @@ class ArtifactPredictor:
             self.edge_ids,
             self.targets,
             self.config,
+            self.feature_names,
         )
         X = scale_X(matrix[None, :, :], self.x_mean, self.x_std)
 
         if self.kind == "xgboost":
-            pred_scaled = self.artifact["model"].predict(X.reshape(1, -1))
+            pred_scaled = np.asarray(self.artifact["model"].predict(X.reshape(1, -1)), dtype=np.float32)
+            target_reducer = self.artifact.get("target_reducer")
+            if target_reducer is not None:
+                pred_scaled = target_reducer.inverse_transform(pred_scaled).astype(np.float32)
             pred_scaled = pred_scaled.reshape(1, self.horizon_steps, -1)
         elif self.kind in {"lstm", "transformer_v1"}:
             import torch
@@ -163,6 +184,8 @@ class ArtifactPredictor:
             self.targets,
             self.model_name,
             horizon_steps,
+            self.observation_level,
+            self.entity_metadata,
         )
 
     def _get_torch_model(self):

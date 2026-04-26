@@ -1,0 +1,59 @@
+{
+  "description": "Spatial route rebalance: 70% vehicles on perimeter-oriented routes, 30% to internal destinations.",
+  "perimeter_share": 0.7,
+  "perimeter_margin": 0.1,
+  "min_perimeter_lanes": 2,
+  "perimeter_route_count": 84,
+  "internal_route_count": 36,
+  "high_input_share": 0.62,
+  "low_input_share": 0.38,
+  "high_input_edges": [
+    "-E15",
+    "-E17",
+    "E40",
+    "-E39",
+    "E31",
+    "-E33"
+  ],
+  "low_input_edges": [
+    "-E4",
+    "143009830#0.1574",
+    "-143009874.1041",
+    "E23.226",
+    "-E27",
+    "-472652453#5.1331",
+    "E29"
+  ],
+  "relief_destination_edges": [
+    "-E34.60",
+    "-E35.87",
+    "-472652453#1",
+    "158074689#3",
+    "-158074689#3"
+  ],
+  "relief_destination_weight": 18,
+  "discouraged_edges": {
+    "E3": 2.4,
+    "E5": 2.6,
+    "E6": 2.8,
+    "-E23.55": 3.0,
+    "-472652453#1": 1.35,
+    "472652453#1": 2.1,
+    "472652453#2": 2.15,
+    "472652453#3": 2.15,
+    "158176575#3.57": 2.1,
+    "158176575#3": 1.9,
+    "158074689#1": 2.3,
+    "158074689#3": 1.75,
+    "-158074689#3": 1.75,
+    "143009830#0.1693": 1.8
+  },
+  "encouraged_edges": {
+    "-E34.60": 0.78,
+    "-E35.87": 0.74,
+    "-472652453#1": 0.92,
+    "158074689#3": 0.9,
+    "-158074689#3": 0.9
+  },
+  "seed": 20260425
+}

@@ -105,7 +105,19 @@
             flex-direction: column;
             align-items: stretch;
             gap: 12px;
-            pointer-events: none;
+            max-height: calc(100vh - 180px);
+            overflow-y: auto;
+            padding-right: 2px;
+            pointer-events: auto;
+        }
+
+        .right-rail::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .right-rail::-webkit-scrollbar-thumb {
+            background: rgba(13, 223, 255, 0.28);
+            border-radius: 999px;
         }
 
         .prediction-panel {
@@ -306,6 +318,43 @@
             color: #fff;
             font-size: 12px;
             font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .signal-mini-marker {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 3px 5px;
+            border: 1px solid rgba(13, 223, 255, 0.48);
+            border-radius: 999px;
+            background: rgba(5, 10, 18, 0.86);
+            box-shadow: 0 0 8px rgba(13, 223, 255, 0.25);
+            color: #dffcff;
+            font-size: 9px;
+            line-height: 1;
+            white-space: nowrap;
+        }
+
+        .signal-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 999px;
+            background: rgba(140, 160, 180, 0.35);
+        }
+
+        .signal-dot.red.active {
+            background: #ff4d4f;
+            box-shadow: 0 0 7px rgba(255, 77, 79, 0.9);
+        }
+
+        .signal-dot.yellow.active {
+            background: #ffd84d;
+            box-shadow: 0 0 7px rgba(255, 216, 77, 0.9);
+        }
+
+        .signal-dot.green.active {
+            background: #4dff88;
+            box-shadow: 0 0 7px rgba(77, 255, 136, 0.9);
         }
 
         .metrics-grid {
@@ -639,6 +688,7 @@
                         </div>
                     </div>
                 </div>
+
             </aside>
         </div>
 
@@ -650,6 +700,6 @@
             <div id="incidentList"></div>
         </div>
     </div>
-    <script src="/static/js/main.js?v=20260424_incident_compare"></script>
+    <script src="/static/js/main.js?v=20260425_no_signal_panel"></script>
 </body>
 </html>

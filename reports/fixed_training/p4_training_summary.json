@@ -1,0 +1,41 @@
+{
+  "status": "ok",
+  "note": "P4 movement-level control-feature closed-loop pipeline",
+  "archive_dir": "",
+  "dataset": {
+    "X_shape": [
+      1836,
+      12,
+      1512
+    ],
+    "y_shape": [
+      1836,
+      15,
+      453
+    ],
+    "n_train": 1258,
+    "n_val": 272,
+    "n_test": 306,
+    "input_features": 1512,
+    "output_features": 453
+  },
+  "ablation_dataset": {
+    "X_shape": [
+      1836,
+      12,
+      1059
+    ],
+    "y_shape": [
+      1836,
+      15,
+      453
+    ],
+    "input_features": 1059,
+    "output_features": 453
+  },
+  "base_demand_factor": 0.25,
+  "control_features_enabled": true,
+  "best_model": "transformer_v1",
+  "metrics_path": "reports\\fixed_training\\metrics.csv",
+  "control_ablation_path": "reports\\fixed_training\\control_feature_ablation.csv"
+}

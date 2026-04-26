@@ -1,0 +1,6 @@
+{
+  "active_model": "xgboost",
+  "active_artifact": "xgboost_model.joblib",
+  "active_alias": "best_model.joblib",
+  "note": "P4 movement-level control-feature closed-loop pipeline"
+}

@@ -24,7 +24,7 @@ configure_sumo_python_path()
 
 import traci
 from prediction import (
-    EdgeRealtimeCollector,
+    MovementRealtimeCollector,
     PredictRequest,
     PredictionModelSwitchRequest,
     ScenarioCompareRequest,
@@ -78,15 +78,17 @@ current_edge_id = 'ALL' # default_edge_id
 
 prediction_service = PredictionService(
     prediction_config,
-    PROJECT_ROOT / "models" / "artifacts",
-    PROJECT_ROOT / "reports" / "metrics.csv",
-    PROJECT_ROOT / "data" / "raw" / "batch_edge_aggregates.csv",
-    PROJECT_ROOT / "data" / "raw" / "scenarios" / "manifest.csv",
+    PROJECT_ROOT / prediction_config.artifact_dir,
+    PROJECT_ROOT / prediction_config.metrics_file,
+    PROJECT_ROOT / prediction_config.batch_csv_file,
+    PROJECT_ROOT / prediction_config.scenario_manifest_file,
 )
-edge_collector = EdgeRealtimeCollector(
+edge_collector = MovementRealtimeCollector(
     prediction_config,
-    PROJECT_ROOT / "data" / "raw" / "realtime_edge_aggregates.csv",
+    PROJECT_ROOT / "data" / "raw" / "realtime_movement_aggregates.csv",
     base_demand_factor=prediction_config.base_demand_factor,
+    project_root=PROJECT_ROOT,
+    net_file=runtime_net_file,
 )
 validate_prediction_runtime(
     PROJECT_ROOT,
@@ -260,6 +262,10 @@ async def get_prediction_config():
 @app.get("/api/prediction/latest")
 async def get_latest_prediction():
     return prediction_service.latest_payload()
+
+@app.get("/api/prediction/phase-aggregate")
+async def get_prediction_phase_aggregate():
+    return prediction_service.phase_aggregate_payload()
 
 @app.get("/api/prediction/scenario-runs")
 async def get_prediction_scenario_runs():
@@ -484,11 +490,21 @@ async def sumo_simulation_task():
             for tl_id in traci.trafficlight.getIDList():
                 state = traci.trafficlight.getRedYellowGreenState(tl_id)
                 try:
+                    phase = traci.trafficlight.getPhase(tl_id)
+                    next_switch = float(traci.trafficlight.getNextSwitch(tl_id))
+                    time_to_switch = max(0.0, next_switch - sim_time_s)
                     # 获取交叉口的中心点坐标
                     x, y = traci.junction.getPosition(tl_id)
                     lon_wgs, lat_wgs = net_obj.convertXY2LonLat(x, y)
                     lon, lat = wgs84_to_gcj02(lon_wgs, lat_wgs)
-                    tl_data.append({"id": tl_id, "state": state, "x": lon, "y": lat})
+                    tl_data.append({
+                        "id": tl_id,
+                        "state": state,
+                        "phase": phase,
+                        "time_to_switch": time_to_switch,
+                        "x": lon,
+                        "y": lat,
+                    })
                 except Exception:
                     pass
 

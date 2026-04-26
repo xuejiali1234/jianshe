@@ -1,0 +1,41 @@
+{
+  "status": "ok",
+  "note": "P4 movement-level control-feature closed-loop pipeline",
+  "archive_dir": "",
+  "dataset": {
+    "X_shape": [
+      16,
+      12,
+      1512
+    ],
+    "y_shape": [
+      16,
+      15,
+      453
+    ],
+    "n_train": 8,
+    "n_val": 4,
+    "n_test": 4,
+    "input_features": 1512,
+    "output_features": 453
+  },
+  "ablation_dataset": {
+    "X_shape": [
+      16,
+      12,
+      1059
+    ],
+    "y_shape": [
+      16,
+      15,
+      453
+    ],
+    "input_features": 1059,
+    "output_features": 453
+  },
+  "base_demand_factor": 0.25,
+  "control_features_enabled": true,
+  "best_model": "xgboost",
+  "metrics_path": "reports\\smoke_training_v2\\metrics.csv",
+  "control_ablation_path": "reports\\smoke_training_v2\\control_feature_ablation.csv"
+}

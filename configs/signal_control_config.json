@@ -1,4 +1,31 @@
 {
+  "tls_selection_mode": "auto_all_intersections",
+  "auto_tls_min_incoming_edges": 3,
+  "auto_tls_min_outgoing_edges": 3,
+  "auto_tls_candidate_junction_ids": [
+    "12254169256",
+    "12254641672",
+    "12254671324",
+    "12254692358",
+    "12257754085",
+    "12257754093",
+    "12257758208",
+    "12257758209",
+    "12257758211",
+    "12260384797",
+    "1702536336",
+    "1702536375",
+    "1704063275",
+    "1704063278",
+    "1704063283",
+    "1704063284",
+    "1704063290",
+    "1704063298",
+    "1704263587",
+    "J42",
+    "J49",
+    "J55"
+  ],
   "manual_tls_junction_ids": [
     "12254671324",
     "12260384797",
@@ -18,6 +45,9 @@
   "disabled_tls_junction_ids": [
     "1704063287"
   ],
+  "movement_signal_adjustment_enabled": true,
+  "movement_signal_adjustment_csv": "data/raw/batch_movement_aggregates.csv",
+  "movement_signal_adjustment_config": "configs/movement_config.json",
   "junction_notes": {
     "12254671324": "自动识别后保留",
     "12260384797": "自动识别后保留",

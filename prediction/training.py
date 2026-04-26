@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,7 @@ from .service import PredictionService
 from .torch_models import LSTMForecaster, TransformerForecaster
 
 
-NOTE = "P4 low-demand baseline + incident enhancement pipeline"
+NOTE = "P4 movement-level control-feature closed-loop pipeline"
 ARTIFACT_FILES = [
     "xgboost_model.joblib",
     "lstm_model.pt",
@@ -39,18 +40,24 @@ ARTIFACT_FILES = [
     "best_model.joblib",
     "model_registry.json",
 ]
-REPORT_FILES = ["metrics.csv", "smoke_test_summary.json", "p4_training_summary.json"]
+REPORT_FILES = [
+    "metrics.csv",
+    "control_feature_ablation.csv",
+    "smoke_test_summary.json",
+    "p4_training_summary.json",
+]
 
 
 def train_all(
     config_path: str | Path = "configs/prediction_config.json",
-    csv_path: str | Path = "data/raw/batch_edge_aggregates.csv",
-    dataset_dir: str | Path = "data/datasets/p4_low_demand_incident",
+    csv_path: str | Path = "data/raw/batch_movement_aggregates.csv",
+    dataset_dir: str | Path = "data/datasets/p4_movement_control",
     artifact_dir: str | Path = "models/artifacts",
     report_dir: str | Path = "reports",
 ) -> dict[str, Any]:
     config = load_prediction_config(config_path)
-    dataset = build_dataset_from_csv(csv_path, config)
+    dataset = build_dataset_from_csv(csv_path, config, include_control_features=True)
+    ablation_dataset = build_dataset_from_csv(csv_path, config, include_control_features=False)
 
     artifact_root = Path(artifact_dir)
     report_root = Path(report_dir)
@@ -59,9 +66,93 @@ def train_all(
         print(f"archived previous training outputs to {archive_dir}")
 
     dataset.save(dataset_dir)
+    ablation_dataset_dir = Path(dataset_dir).with_name(f"{Path(dataset_dir).name}_no_control")
+    ablation_dataset.save(ablation_dataset_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
+    ablation_artifact_root = artifact_root / "control_feature_ablation_off"
+    ablation_artifact_root.mkdir(parents=True, exist_ok=True)
     (report_root / "figures").mkdir(parents=True, exist_ok=True)
 
+    metrics_rows, predictions = train_model_suite(dataset, config.device, artifact_root)
+    ablation_rows, ablation_predictions = train_model_suite(
+        ablation_dataset,
+        config.device,
+        ablation_artifact_root,
+    )
+
+    append_metrics_csv(report_root / "metrics.csv", metrics_rows)
+    write_control_ablation_csv(
+        report_root / "control_feature_ablation.csv",
+        [
+            annotate_feature_set(row, "with_control") for row in metrics_rows
+        ]
+        + [
+            annotate_feature_set(row, "without_control") for row in ablation_rows
+        ],
+    )
+    best = select_best(metrics_rows)
+    if best:
+        write_best_artifact(best["model"], artifact_root)
+
+    plot_prediction_comparison(
+        dataset.y[dataset.test_idx],
+        predictions,
+        dataset,
+        report_root / "figures" / "prediction_comparison_overall.png",
+    )
+    plot_incident_vs_normal(
+        dataset,
+        predictions,
+        best["model"] if best else next(iter(predictions), "ha_baseline"),
+        report_root / "figures" / "normal_vs_incident_prediction.png",
+    )
+    plot_subset_metric_bars(
+        metrics_rows,
+        report_root / "figures" / "incident_subset_metrics.png",
+    )
+    plot_control_feature_ablation(
+        report_root / "control_feature_ablation.csv",
+        report_root / "figures" / "control_feature_ablation.png",
+    )
+
+    summary = {
+        "status": "ok",
+        "note": NOTE,
+        "archive_dir": str(archive_dir) if archive_dir else "",
+        "dataset": {
+            "X_shape": list(dataset.X.shape),
+            "y_shape": list(dataset.y.shape),
+            "n_train": int(len(dataset.train_idx)),
+            "n_val": int(len(dataset.val_idx)),
+            "n_test": int(len(dataset.test_idx)),
+            "input_features": int(dataset.X.shape[-1]),
+            "output_features": int(dataset.y.shape[-1]),
+        },
+        "ablation_dataset": {
+            "X_shape": list(ablation_dataset.X.shape),
+            "y_shape": list(ablation_dataset.y.shape),
+            "input_features": int(ablation_dataset.X.shape[-1]),
+            "output_features": int(ablation_dataset.y.shape[-1]),
+        },
+        "base_demand_factor": config.base_demand_factor,
+        "control_features_enabled": True,
+        "best_model": best["model"] if best else "ha_baseline",
+        "metrics_path": str(report_root / "metrics.csv"),
+        "control_ablation_path": str(report_root / "control_feature_ablation.csv"),
+    }
+    (report_root / "p4_training_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return summary
+
+
+def train_model_suite(
+    dataset: DatasetBundle,
+    device: str,
+    artifact_root: Path,
+) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
+    artifact_root.mkdir(parents=True, exist_ok=True)
     metrics_rows: list[dict[str, Any]] = []
     predictions: dict[str, np.ndarray] = {}
 
@@ -81,7 +172,7 @@ def train_all(
         metrics_rows.append(error_row("xgboost", str(exc)))
 
     try:
-        lstm_pred = train_torch_model("lstm", dataset, config.device, artifact_root)
+        lstm_pred = train_torch_model("lstm", dataset, device, artifact_root)
         predictions["lstm"] = lstm_pred
         metrics_rows.extend(rows_for_subsets("lstm", dataset, test_idx, y_true_test, lstm_pred, subset_masks))
     except Exception as exc:
@@ -91,7 +182,7 @@ def train_all(
         transformer_pred = train_torch_model(
             "transformer_v1",
             dataset,
-            config.device,
+            device,
             artifact_root,
         )
         predictions["transformer_v1"] = transformer_pred
@@ -101,50 +192,13 @@ def train_all(
     except Exception as exc:
         metrics_rows.append(error_row("transformer_v1", str(exc)))
 
-    append_metrics_csv(report_root / "metrics.csv", metrics_rows)
-    best = select_best(metrics_rows)
-    if best:
-        write_best_artifact(best["model"], artifact_root)
+    return metrics_rows, predictions
 
-    plot_prediction_comparison(
-        y_true_test,
-        predictions,
-        dataset,
-        report_root / "figures" / "prediction_comparison_overall.png",
-    )
-    plot_incident_vs_normal(
-        dataset,
-        predictions,
-        best["model"] if best else next(iter(predictions), "ha_baseline"),
-        report_root / "figures" / "normal_vs_incident_prediction.png",
-    )
-    plot_subset_metric_bars(
-        metrics_rows,
-        report_root / "figures" / "incident_subset_metrics.png",
-    )
 
-    summary = {
-        "status": "ok",
-        "note": NOTE,
-        "archive_dir": str(archive_dir) if archive_dir else "",
-        "dataset": {
-            "X_shape": list(dataset.X.shape),
-            "y_shape": list(dataset.y.shape),
-            "n_train": int(len(dataset.train_idx)),
-            "n_val": int(len(dataset.val_idx)),
-            "n_test": int(len(dataset.test_idx)),
-            "input_features": int(dataset.X.shape[-1]),
-            "output_features": int(dataset.y.shape[-1]),
-        },
-        "base_demand_factor": config.base_demand_factor,
-        "best_model": best["model"] if best else "ha_baseline",
-        "metrics_path": str(report_root / "metrics.csv"),
-    }
-    (report_root / "p4_training_summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return summary
+def annotate_feature_set(row: dict[str, Any], feature_set: str) -> dict[str, Any]:
+    annotated = dict(row)
+    annotated["feature_set"] = feature_set
+    return annotated
 
 
 def archive_existing_outputs(
@@ -184,30 +238,39 @@ def archive_existing_outputs(
 
 def build_subset_masks(dataset: DatasetBundle, indices: np.ndarray) -> dict[str, np.ndarray]:
     incident_flags = dataset.sample_incident_flags[indices].astype(bool)
+    signal_variants = dataset.sample_signal_variants[indices].astype(str)
     return {
         "overall": np.ones(len(indices), dtype=bool),
         "non_incident": ~incident_flags,
         "incident": incident_flags,
+        "control_perturbation": signal_variants != "webster_base",
     }
 
 
 def predict_ha(dataset: DatasetBundle, indices: np.ndarray) -> np.ndarray:
     X = dataset.X[indices]
     mean_history = []
-    target_width = len(dataset.targets)
-    stride = len(dataset.targets) + 1
+    input_indices = target_input_indices(dataset)
     for sample in X:
         edge_values = []
-        for edge_index, _edge_id in enumerate(dataset.edge_ids):
-            offset = edge_index * stride
-            edge_values.extend(sample[:, offset : offset + target_width].mean(axis=0).tolist())
+        for edge_id in dataset.edge_ids:
+            for target in dataset.targets:
+                edge_values.append(float(sample[:, input_indices[(edge_id, target)]].mean()))
         mean_history.append(edge_values)
     repeated = np.asarray(mean_history, dtype=np.float32)[:, None, :]
     return np.repeat(repeated, dataset.y.shape[1], axis=1).astype(np.float32)
 
 
+def target_input_indices(dataset: DatasetBundle) -> dict[tuple[str, str], int]:
+    return {
+        (edge_id, target): dataset.feature_names.index(f"{edge_id}__{target}")
+        for edge_id in dataset.edge_ids
+        for target in dataset.targets
+    }
+
+
 def train_xgboost(dataset: DatasetBundle, artifact_root: Path) -> np.ndarray:
-    from sklearn.multioutput import MultiOutputRegressor
+    from sklearn.decomposition import PCA
     from xgboost import XGBRegressor
 
     X_train, y_train = flatten_scaled(dataset, dataset.train_idx)
@@ -215,20 +278,35 @@ def train_xgboost(dataset: DatasetBundle, artifact_root: Path) -> np.ndarray:
         len(dataset.test_idx),
         -1,
     )
-    model = MultiOutputRegressor(
-        XGBRegressor(
-            n_estimators=30,
-            max_depth=3,
-            learning_rate=0.08,
-            subsample=1.0,
-            colsample_bytree=1.0,
-            objective="reg:squarederror",
-            random_state=42,
-            n_jobs=1,
+    target_reducer = None
+    y_fit = y_train
+    max_native_outputs = int(os.environ.get("TRAFFIC_XGB_NATIVE_OUTPUT_LIMIT", "2000"))
+    if y_train.shape[1] > max_native_outputs:
+        n_components = min(
+            int(os.environ.get("TRAFFIC_XGB_PCA_COMPONENTS", "64")),
+            max(1, y_train.shape[0] - 1),
+            y_train.shape[1],
         )
+        target_reducer = PCA(n_components=n_components, svd_solver="randomized", random_state=42)
+        y_fit = target_reducer.fit_transform(y_train)
+
+    model = XGBRegressor(
+        n_estimators=int(os.environ.get("TRAFFIC_XGB_ESTIMATORS", "8")),
+        max_depth=int(os.environ.get("TRAFFIC_XGB_MAX_DEPTH", "2")),
+        learning_rate=0.08,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        objective="reg:squarederror",
+        random_state=42,
+        n_jobs=-1,
+        tree_method="hist",
+        multi_strategy="multi_output_tree",
     )
-    model.fit(X_train, y_train)
-    pred_scaled = model.predict(X_test).reshape(
+    model.fit(X_train, y_fit)
+    pred_scaled_flat = np.asarray(model.predict(X_test), dtype=np.float32)
+    if target_reducer is not None:
+        pred_scaled_flat = target_reducer.inverse_transform(pred_scaled_flat).astype(np.float32)
+    pred_scaled = pred_scaled_flat.reshape(
         len(dataset.test_idx),
         dataset.y.shape[1],
         dataset.y.shape[2],
@@ -237,6 +315,9 @@ def train_xgboost(dataset: DatasetBundle, artifact_root: Path) -> np.ndarray:
     artifact = {
         "kind": "xgboost",
         "model_name": "xgboost",
+        "xgboost_multi_strategy": "multi_output_tree",
+        "target_reducer": target_reducer,
+        "target_reducer_kind": "pca" if target_reducer is not None else "",
         "model": model,
         **dataset.metadata_for_artifact(),
     }
@@ -290,13 +371,16 @@ def train_torch_model(
 
     model.to(device)
     train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
-    train_loader = DataLoader(train_ds, batch_size=min(16, len(train_ds)), shuffle=True)
+    train_loader = DataLoader(train_ds, batch_size=min(64, len(train_ds)), shuffle=True)
     criterion = nn.HuberLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     best_state = None
     best_val = math.inf
+    patience = int(os.environ.get("TRAFFIC_TRAIN_PATIENCE", "4"))
+    stale_epochs = 0
+    max_epochs = int(os.environ.get("TRAFFIC_TRAIN_EPOCHS", "12"))
 
-    for _ in range(50):
+    for _ in range(max_epochs):
         model.train()
         for xb, yb in train_loader:
             xb = xb.to(device)
@@ -313,6 +397,11 @@ def train_torch_model(
         if val_loss < best_val:
             best_val = val_loss
             best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+            if stale_epochs >= patience:
+                break
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -509,36 +598,124 @@ def plot_subset_metric_bars(rows: list[dict[str, Any]], output_path: Path) -> No
     plt.close()
 
 
+def write_control_ablation_csv(path: str | Path, rows: list[dict[str, Any]]) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "feature_set",
+        "model",
+        "split",
+        "n_samples",
+        "run_count",
+        "subset",
+        "mae",
+        "rmse",
+        "wape",
+        "mae_h5",
+        "rmse_h5",
+        "wape_h5",
+        "mae_h10",
+        "rmse_h10",
+        "wape_h10",
+        "mae_h15",
+        "rmse_h15",
+        "wape_h15",
+        "note",
+    ]
+    with out.open("w", newline="", encoding="utf-8") as fp:
+        import csv
+
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def plot_control_feature_ablation(csv_path: str | Path, output_path: Path) -> None:
+    import csv
+
+    path = Path(csv_path)
+    if not path.exists():
+        return
+
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as fp:
+        reader = csv.DictReader(fp)
+        for row in reader:
+            if row.get("subset") in {"overall", "control_perturbation"} and row.get("mae"):
+                try:
+                    row["mae_value"] = float(row["mae"])
+                except ValueError:
+                    continue
+                rows.append(row)
+    if not rows:
+        return
+
+    labels = []
+    values = []
+    colors = []
+    for row in rows:
+        labels.append(f"{row['model']}\n{row['feature_set']}\n{row['subset']}")
+        values.append(row["mae_value"])
+        colors.append("#27a2ff" if row["feature_set"] == "with_control" else "#a0a7b5")
+
+    plt.figure(figsize=(max(10, len(labels) * 0.55), 5))
+    plt.bar(np.arange(len(values)), values, color=colors)
+    plt.xticks(np.arange(len(values)), labels, rotation=45, ha="right", fontsize=8)
+    plt.ylabel("MAE")
+    plt.title("Control Feature Ablation")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
 def run_smoke_test(
     config_path: str | Path = "configs/prediction_config.json",
-    dataset_dir: str | Path = "data/datasets/p4_low_demand_incident",
+    dataset_dir: str | Path = "data/datasets/p4_movement_control",
 ) -> dict[str, Any]:
     service = PredictionService(load_prediction_config(config_path))
     dataset = DatasetBundle.load(dataset_dir)
     idx = int(dataset.test_idx[0])
-    nodes_window = []
-    stride = len(dataset.targets) + 1
+    window = []
+    input_indices = target_input_indices(dataset)
     for step in dataset.X[idx]:
-        nodes = []
+        items = []
         for edge_index, edge_id in enumerate(dataset.edge_ids):
-            offset = edge_index * stride
-            node = {"edge_id": edge_id}
-            for target_index, target in enumerate(dataset.targets):
-                node[target] = float(step[offset + target_index])
-            node["incident_flag"] = float(step[offset + len(dataset.targets)])
-            nodes.append(node)
-        nodes_window.append({"timestamp": None, "nodes": nodes})
-    payload = service.predict_request(PredictRequest(window=nodes_window, horizon=15))
-    if payload["horizon"][-1] != 15 or len(payload["nodes"]) != len(dataset.edge_ids):
+            node = {"movement_id": edge_id} if dataset.observation_level == "movement" else {"edge_id": edge_id}
+            if dataset.entity_metadata and edge_id in dataset.entity_metadata:
+                node.update(dataset.entity_metadata[edge_id])
+            for target in dataset.targets:
+                node[target] = float(step[input_indices[(edge_id, target)]])
+            incident_feature = f"{edge_id}__incident_flag"
+            if incident_feature in dataset.feature_names:
+                node["incident_flag"] = float(step[dataset.feature_names.index(incident_feature)])
+            for control_feature in ("phase_id", "phase_elapsed_s", "green_remaining_s"):
+                feature_name = f"{edge_id}__{control_feature}"
+                if feature_name in dataset.feature_names:
+                    node[control_feature] = float(step[dataset.feature_names.index(feature_name)])
+            items.append(node)
+        if dataset.observation_level == "movement":
+            window.append({"timestamp": None, "movements": items})
+        else:
+            window.append({"timestamp": None, "nodes": items})
+    payload = service.predict_request(PredictRequest(window=window, horizon=15))
+    expected_key = "movements" if dataset.observation_level == "movement" else "nodes"
+    if payload["horizon"][-1] != 15 or len(payload.get(expected_key, [])) != len(dataset.edge_ids):
         raise RuntimeError("Smoke API prediction returned an unexpected shape")
-    return {"status": "ok", "model": payload["model"], "nodes": len(payload["nodes"])}
+    return {
+        "status": "ok",
+        "model": payload["model"],
+        "observation_level": dataset.observation_level,
+        expected_key: len(payload.get(expected_key, [])),
+        "legacy_nodes": len(payload.get("nodes", [])),
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train low-demand incident-aware traffic prediction models.")
     parser.add_argument("--config", default="configs/prediction_config.json")
-    parser.add_argument("--csv", default="data/raw/batch_edge_aggregates.csv")
-    parser.add_argument("--dataset-dir", default="data/datasets/p4_low_demand_incident")
+    parser.add_argument("--csv", default="data/raw/batch_movement_aggregates.csv")
+    parser.add_argument("--dataset-dir", default="data/datasets/p4_movement_control")
     parser.add_argument("--artifact-dir", default="models/artifacts")
     parser.add_argument("--report-dir", default="reports")
     parser.add_argument("--smoke-test", action="store_true")

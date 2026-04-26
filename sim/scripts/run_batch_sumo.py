@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import csv
 import shutil
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from prediction import EdgeRealtimeCollector, load_prediction_config
+from prediction import EdgeRealtimeCollector, MovementRealtimeCollector, load_prediction_config
 from sim import configure_sumo_python_path, resolve_runtime_net_file, write_scaled_route_file
+from sim.movement_tools import build_movement_config
 
 configure_sumo_python_path()
 
@@ -20,8 +22,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BASE_ROUTE = PROJECT_ROOT / "czq_demand.rou.xml"
 SCENARIO_DIR = PROJECT_ROOT / "data" / "raw" / "scenarios"
 ROUTE_DIR = SCENARIO_DIR / "routes"
+NET_DIR = SCENARIO_DIR / "nets"
 MANIFEST_PATH = SCENARIO_DIR / "manifest.csv"
-OUTPUT_CSV = PROJECT_ROOT / "data" / "raw" / "batch_edge_aggregates.csv"
+OUTPUT_CSV = PROJECT_ROOT / "data" / "raw" / "batch_movement_aggregates.csv"
+LEGACY_EDGE_OUTPUT_CSV = PROJECT_ROOT / "data" / "raw" / "batch_edge_aggregates.csv"
 ARCHIVE_ROOT = PROJECT_ROOT / "data" / "archive"
 
 INCIDENT_WINDOW = (1200, 2100)
@@ -29,6 +33,11 @@ INCIDENT_SPEED_FACTOR = 0.25
 INCIDENT_TEMPLATES = {
     "mainline_drop": ("472652453#2", "472652453#3"),
     "downstream_drop": ("1324604419#0", "1324604419#1"),
+}
+SIGNAL_VARIANT_GREEN_SCALES = {
+    "webster_base": 1.0,
+    "short_cycle": 0.80,
+    "long_cycle": 1.25,
 }
 
 
@@ -41,10 +50,13 @@ class Scenario:
     incident_start_s: int = 0
     incident_end_s: int = 0
     affected_edges: tuple[str, ...] = field(default_factory=tuple)
+    signal_variant: str = "webster_base"
 
     @property
     def run_id(self) -> str:
         scale_tag = f"{self.demand_scale:.2f}".replace(".", "p")
+        if self.scenario_id == "S3_control":
+            return f"S3_control_{self.signal_variant}_scale_{scale_tag}_seed_{self.seed}"
         if self.incident_type:
             return f"S4_incident_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
         return f"{self.scenario_id}_scale_{scale_tag}_seed_{self.seed}"
@@ -68,6 +80,17 @@ def default_scenarios() -> list[Scenario]:
         for seed in seeds
     ]
     incident_scales = [1.10, 1.30, 1.50]
+    control = [
+        Scenario(
+            scenario_id="S3_control",
+            demand_scale=scale,
+            seed=seed,
+            signal_variant=signal_variant,
+        )
+        for signal_variant in ("short_cycle", "long_cycle")
+        for scale in (1.10, 1.30)
+        for seed in seeds
+    ]
     incident = [
         Scenario(
             scenario_id="S4_incident",
@@ -82,11 +105,35 @@ def default_scenarios() -> list[Scenario]:
         for scale in incident_scales
         for seed in seeds
     ]
-    return [*regular, *incident]
+    return [*regular, *incident, *control]
 
 
-def archive_existing_outputs() -> Path | None:
-    existing = [path for path in [OUTPUT_CSV, MANIFEST_PATH, ROUTE_DIR] if path.exists()]
+def output_csv_for_collector(collector_mode: str, output_csv: Path | None = None) -> Path:
+    if output_csv is not None:
+        return output_csv
+    return OUTPUT_CSV if collector_mode == "movement" else LEGACY_EDGE_OUTPUT_CSV
+
+
+def paths_for_scenario_dir(scenario_dir: Path | None = None) -> tuple[Path, Path, Path]:
+    scenario_dir = scenario_dir or SCENARIO_DIR
+    return scenario_dir / "manifest.csv", scenario_dir / "routes", scenario_dir / "nets"
+
+
+def archive_existing_outputs(
+    collector_mode: str,
+    output_csv: Path | None = None,
+    manifest_path: Path | None = None,
+    route_dir: Path | None = None,
+    net_dir: Path | None = None,
+) -> Path | None:
+    manifest_path = manifest_path or MANIFEST_PATH
+    route_dir = route_dir or ROUTE_DIR
+    net_dir = net_dir or NET_DIR
+    existing = [
+        path
+        for path in [output_csv_for_collector(collector_mode, output_csv), manifest_path, route_dir, net_dir]
+        if path.exists()
+    ]
     if not existing:
         return None
 
@@ -103,9 +150,10 @@ def archive_existing_outputs() -> Path | None:
     return archive_dir
 
 
-def write_manifest(rows: list[dict]) -> None:
-    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with MANIFEST_PATH.open("w", newline="", encoding="utf-8") as fp:
+def write_manifest(rows: list[dict], manifest_path: Path | None = None) -> None:
+    manifest_path = manifest_path or MANIFEST_PATH
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(
             fp,
             fieldnames=[
@@ -114,11 +162,13 @@ def write_manifest(rows: list[dict]) -> None:
                 "seed",
                 "demand_scale",
                 "base_demand_factor",
+                "signal_variant",
                 "incident_type",
                 "incident_start_s",
                 "incident_end_s",
                 "affected_edges",
                 "route_file",
+                "net_file",
                 "status",
                 "snapshots",
                 "message",
@@ -126,6 +176,35 @@ def write_manifest(rows: list[dict]) -> None:
         )
         writer.writeheader()
         writer.writerows(rows)
+
+
+def prepare_signal_variant_net(source_net: Path, signal_variant: str, net_dir: Path | None = None) -> Path:
+    signal_variant = signal_variant or "webster_base"
+    if signal_variant == "webster_base":
+        return source_net
+    if signal_variant not in SIGNAL_VARIANT_GREEN_SCALES:
+        raise ValueError(f"Unknown signal_variant: {signal_variant}")
+
+    net_dir = net_dir or NET_DIR
+    net_dir.mkdir(parents=True, exist_ok=True)
+    output_path = net_dir / f"{source_net.stem}_{signal_variant}.net.xml"
+    if output_path.exists():
+        return output_path
+
+    green_scale = SIGNAL_VARIANT_GREEN_SCALES[signal_variant]
+    tree = ET.parse(source_net)
+    root = tree.getroot()
+    for phase in root.findall(".//tlLogic/phase"):
+        state = phase.attrib.get("state", "")
+        if not any(char in "Gg" for char in state):
+            continue
+        try:
+            duration = float(phase.attrib.get("duration", "0"))
+        except ValueError:
+            continue
+        phase.set("duration", str(max(5, int(round(duration * green_scale)))))
+    tree.write(output_path, encoding="utf-8", xml_declaration=True)
+    return output_path
 
 
 def apply_incident_controls(
@@ -158,30 +237,54 @@ def run_one_scenario(
     sim_end: int,
     base_demand_factor: float,
     net_file: Path,
+    collector_mode: str,
+    movement_config_path: Path | None = None,
+    output_csv: Path | None = None,
+    route_dir: Path | None = None,
+    net_dir: Path | None = None,
 ) -> dict:
     config = load_prediction_config(config_path)
-    route_path = ROUTE_DIR / f"{scenario.run_id}.rou.xml"
+    route_dir = route_dir or ROUTE_DIR
+    route_dir.mkdir(parents=True, exist_ok=True)
+    route_path = route_dir / f"{scenario.run_id}.rou.xml"
+    scenario_net_file = prepare_signal_variant_net(net_file, scenario.signal_variant, net_dir)
     effective_scale = base_demand_factor * scenario.demand_scale
     write_scaled_route_file(BASE_ROUTE, route_path, effective_scale)
 
-    collector = EdgeRealtimeCollector(
-        config,
-        OUTPUT_CSV,
-        run_id=scenario.run_id,
-        scenario_id=scenario.scenario_id,
-        seed=scenario.seed,
-        demand_scale=scenario.demand_scale,
-        base_demand_factor=base_demand_factor,
-        incident_type=scenario.incident_type,
-        incident_start_s=scenario.incident_start_s or "",
-        incident_end_s=scenario.incident_end_s or "",
-        affected_edges=list(scenario.affected_edges),
-    )
+    collector_kwargs = {
+        "run_id": scenario.run_id,
+        "scenario_id": scenario.scenario_id,
+        "seed": scenario.seed,
+        "demand_scale": scenario.demand_scale,
+        "base_demand_factor": base_demand_factor,
+        "signal_variant": scenario.signal_variant,
+        "incident_type": scenario.incident_type,
+        "incident_start_s": scenario.incident_start_s or "",
+        "incident_end_s": scenario.incident_end_s or "",
+        "affected_edges": list(scenario.affected_edges),
+    }
+    if collector_mode == "movement":
+        collector = MovementRealtimeCollector(
+            config,
+            output_csv_for_collector(collector_mode, output_csv),
+            **collector_kwargs,
+            project_root=PROJECT_ROOT,
+            net_file=scenario_net_file,
+            movement_config_path=movement_config_path,
+        )
+    elif collector_mode == "edge":
+        collector = EdgeRealtimeCollector(
+            config,
+            output_csv_for_collector(collector_mode, output_csv),
+            **collector_kwargs,
+        )
+    else:
+        raise ValueError(f"Unknown collector mode: {collector_mode}")
     sumo_binary = sumolib.checkBinary("sumo")
     cmd = [
         sumo_binary,
         "-n",
-        str(net_file),
+        str(scenario_net_file),
         "-r",
         str(route_path),
         "--begin",
@@ -208,7 +311,7 @@ def run_one_scenario(
         "10",
     ]
 
-    net_obj = sumolib.net.readNet(str(net_file))
+    net_obj = sumolib.net.readNet(str(scenario_net_file))
     baseline_speeds = {
         edge_id: float(net_obj.getEdge(edge_id).getSpeed())
         for edge_id in scenario.affected_edges
@@ -248,11 +351,13 @@ def run_one_scenario(
             "seed": scenario.seed,
             "demand_scale": scenario.demand_scale,
             "base_demand_factor": base_demand_factor,
+            "signal_variant": scenario.signal_variant,
             "incident_type": scenario.incident_type,
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
             "affected_edges": "|".join(scenario.affected_edges),
             "route_file": str(route_path),
+            "net_file": str(scenario_net_file),
             "status": "ok",
             "snapshots": snapshots,
             "message": "",
@@ -271,11 +376,13 @@ def run_one_scenario(
             "seed": scenario.seed,
             "demand_scale": scenario.demand_scale,
             "base_demand_factor": base_demand_factor,
+            "signal_variant": scenario.signal_variant,
             "incident_type": scenario.incident_type,
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
             "affected_edges": "|".join(scenario.affected_edges),
             "route_file": str(route_path),
+            "net_file": str(scenario_net_file),
             "status": "error",
             "snapshots": snapshots,
             "message": str(exc),
@@ -287,15 +394,43 @@ def run_batch(
     sim_end: int,
     limit: int | None,
     overwrite: bool,
+    collector_mode: str = "movement",
+    movement_config_path: Path | None = None,
+    output_csv: Path | None = None,
+    scenario_dir: Path | None = None,
 ) -> list[dict]:
     config = load_prediction_config(config_path)
     runtime_net_file = resolve_runtime_net_file(PROJECT_ROOT, config.sumo_net_file)
-    if not overwrite and any(path.exists() for path in [OUTPUT_CSV, MANIFEST_PATH, ROUTE_DIR]):
+    collector_mode = collector_mode.lower().strip()
+    if collector_mode not in {"movement", "edge"}:
+        raise ValueError("--collector must be either 'movement' or 'edge'")
+    movement_config_path = movement_config_path or PROJECT_ROOT / getattr(
+        config,
+        "movement_config_file",
+        "configs/movement_config.json",
+    )
+    if not movement_config_path.is_absolute():
+        movement_config_path = PROJECT_ROOT / movement_config_path
+    if collector_mode == "movement":
+        build_movement_config(
+            runtime_net_file,
+            config.observed_edges,
+            movement_config_path,
+            PROJECT_ROOT / "data" / "processed" / "movement_map.csv",
+        )
+
+    selected_output_csv = output_csv_for_collector(collector_mode, output_csv)
+    manifest_path, route_dir, net_dir = paths_for_scenario_dir(scenario_dir)
+    if not overwrite and any(path.exists() for path in [selected_output_csv, manifest_path, route_dir]):
         raise RuntimeError(
             "Existing batch outputs detected. Re-run with --overwrite to archive the current raw outputs "
             "before generating the low-demand incident dataset."
         )
-    archive_dir = archive_existing_outputs() if overwrite else None
+    archive_dir = (
+        archive_existing_outputs(collector_mode, output_csv, manifest_path, route_dir, net_dir)
+        if overwrite
+        else None
+    )
     if archive_dir:
         print(f"archived previous raw outputs to {archive_dir}")
 
@@ -313,10 +448,15 @@ def run_batch(
             sim_end,
             config.base_demand_factor,
             runtime_net_file,
+            collector_mode,
+            movement_config_path,
+            selected_output_csv,
+            route_dir,
+            net_dir,
         )
         print(f"  status={row['status']} snapshots={row['snapshots']} {row['message']}")
         manifest_rows.append(row)
-        write_manifest(manifest_rows)
+        write_manifest(manifest_rows, manifest_path)
     return manifest_rows
 
 
@@ -326,13 +466,27 @@ def main() -> None:
     parser.add_argument("--sim-end", type=int, default=3600)
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N scenarios for testing.")
     parser.add_argument("--overwrite", action="store_true", help="Archive existing raw outputs before running.")
+    parser.add_argument("--collector", choices=["movement", "edge"], default="movement")
+    parser.add_argument("--movement-config", default=None)
+    parser.add_argument("--output-csv", type=Path, default=None)
+    parser.add_argument("--scenario-dir", type=Path, default=None)
     args = parser.parse_args()
 
-    rows = run_batch(Path(args.config), args.sim_end, args.limit, args.overwrite)
+    rows = run_batch(
+        Path(args.config),
+        args.sim_end,
+        args.limit,
+        args.overwrite,
+        args.collector,
+        Path(args.movement_config) if args.movement_config else None,
+        args.output_csv,
+        args.scenario_dir,
+    )
     ok_count = sum(1 for row in rows if row["status"] == "ok")
     print(f"finished {ok_count}/{len(rows)} scenarios")
-    print(f"csv: {OUTPUT_CSV}")
-    print(f"manifest: {MANIFEST_PATH}")
+    print(f"collector: {args.collector}")
+    print(f"csv: {output_csv_for_collector(args.collector, args.output_csv)}")
+    print(f"manifest: {paths_for_scenario_dir(args.scenario_dir)[0]}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+{
+  "active_model": "transformer_v1",
+  "active_artifact": "transformer_v1_model.pt",
+  "active_alias": "best_model.pt",
+  "note": "P4 movement-level control-feature closed-loop pipeline"
+}

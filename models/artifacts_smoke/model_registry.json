@@ -1,0 +1,6 @@
+{
+  "active_model": "lstm",
+  "active_artifact": "lstm_model.pt",
+  "active_alias": "best_model.pt",
+  "note": "P4 movement-level control-feature closed-loop pipeline"
+}

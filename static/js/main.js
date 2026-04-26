@@ -65,6 +65,45 @@ function escapeHtml(text) {
         .replace(/'/g, '&#39;');
 }
 
+function getSignalCounts(state) {
+    const text = String(state || '');
+    const counts = { red: 0, yellow: 0, green: 0 };
+    for (const char of text) {
+        const lower = char.toLowerCase();
+        if (lower === 'r') counts.red += 1;
+        else if (lower === 'y') counts.yellow += 1;
+        else if (lower === 'g') counts.green += 1;
+    }
+    return counts;
+}
+
+function getSignalDominantColor(state) {
+    const counts = getSignalCounts(state);
+    if (counts.yellow > 0) return 'yellow';
+    if (counts.green > 0) return 'green';
+    if (counts.red > 0) return 'red';
+    return 'unknown';
+}
+
+function formatSignalCountdown(seconds) {
+    const number = Number(seconds);
+    if (!Number.isFinite(number)) return '--';
+    return `${Math.max(0, Math.round(number))}s`;
+}
+
+function renderSignalMarkerContent(tl) {
+    const dominant = getSignalDominantColor(tl.state);
+    const phase = Number.isFinite(Number(tl.phase)) ? Number(tl.phase) : '--';
+    return `
+        <div class="signal-mini-marker" title="${escapeHtml(tl.id)} 相位 ${phase}">
+            <span class="signal-dot red ${dominant === 'red' ? 'active' : ''}"></span>
+            <span class="signal-dot yellow ${dominant === 'yellow' ? 'active' : ''}"></span>
+            <span class="signal-dot green ${dominant === 'green' ? 'active' : ''}"></span>
+            <span>P${escapeHtml(phase)}</span>
+        </div>
+    `;
+}
+
 function formatCo2Rate(rawValue) {
     const value = Number(rawValue);
     if (!Number.isFinite(value)) {
@@ -832,13 +871,26 @@ function updateMapVectors() {
     }
 
     while (tlMarkers.length < lastTlData.length) {
-        const marker = new AMap.CircleMarker({
-            center: [0, 0],
-            radius: 4,
-            fillColor: '#aaaaaa',
-            strokeOpacity: 0,
-            fillOpacity: 1,
-            zIndex: 105
+        const marker = new AMap.Marker({
+            position: [0, 0],
+            content: renderSignalMarkerContent({ id: '', state: '', phase: '--' }),
+            offset: new AMap.Pixel(-34, -10),
+            zIndex: 108
+        });
+        marker.on('click', event => {
+            const data = event.target.getExtData();
+            if (!data || !infoWindow) return;
+            const counts = getSignalCounts(data.state);
+            const content = `
+                <div style="color:#333; min-width:160px;">
+                    <b>信号灯：${escapeHtml(data.id)}</b><br/>
+                    相位：P${escapeHtml(data.phase)}<br/>
+                    下一次切换：${formatSignalCountdown(data.time_to_switch)}<br/>
+                    状态：G${counts.green} / Y${counts.yellow} / R${counts.red}
+                </div>
+            `;
+            infoWindow.setContent(content);
+            infoWindow.open(map, marker.getPosition());
         });
         map.add(marker);
         tlMarkers.push(marker);
@@ -849,13 +901,9 @@ function updateMapVectors() {
     }
     for (let i = 0; i < lastTlData.length; i += 1) {
         const tl = lastTlData[i];
-        const state = (tl.state || '').toLowerCase();
-        let color = '#aaaaaa';
-        if (state === 'r') color = '#f56c6c';
-        else if (state === 'y') color = '#e6a23c';
-        else if (state === 'g') color = '#67c23a';
-        tlMarkers[i].setCenter([tl.x, tl.y]);
-        tlMarkers[i].setOptions({ fillColor: color });
+        tlMarkers[i].setPosition([tl.x, tl.y]);
+        tlMarkers[i].setContent(renderSignalMarkerContent(tl));
+        tlMarkers[i].setExtData(tl);
     }
 
     const currentIncidentIds = new Set(lastIncidentsData.map(inc => inc.id));

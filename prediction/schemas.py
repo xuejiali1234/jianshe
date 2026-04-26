@@ -10,11 +10,33 @@ class PredictionNodeInput(BaseModel):
     speed_mps: Optional[float] = None
     queue: Optional[float] = None
     incident_flag: Optional[float] = None
+    phase_id: Optional[float] = None
+    phase_elapsed_s: Optional[float] = None
+    green_remaining_s: Optional[float] = None
+
+
+class PredictionMovementInput(BaseModel):
+    movement_id: str
+    incoming_edge: Optional[str] = None
+    outgoing_edge: Optional[str] = None
+    turn_type: Optional[str] = None
+    arrival_flow: Optional[float] = None
+    discharge_flow: Optional[float] = None
+    mean_speed: Optional[float] = None
+    mean_speed_mps: Optional[float] = None
+    occupancy: Optional[float] = None
+    queue_veh: Optional[float] = None
+    queue_meter: Optional[float] = None
+    incident_flag: Optional[float] = None
+    phase_id: Optional[float] = None
+    phase_elapsed_s: Optional[float] = None
+    green_remaining_s: Optional[float] = None
 
 
 class PredictionWindowStep(BaseModel):
     timestamp: Optional[str] = None
     nodes: list[PredictionNodeInput] = Field(default_factory=list)
+    movements: list[PredictionMovementInput] = Field(default_factory=list)
 
 
 class PredictRequest(BaseModel):

@@ -10,28 +10,32 @@ import pandas as pd
 
 from .baselines import HistoricalAveragePredictor
 from .config import PredictionConfig
+from .dataset import CONTROL_FEATURE_DEFAULTS
+from .movement_collector import movement_rows_to_legacy_nodes
 from .model_io import ArtifactPredictor, discover_available_models
+from .phase_aggregation import aggregate_predictions_by_phase
 from .schemas import PredictRequest, ScenarioCompareRequest
+from sim.movement_tools import load_movement_config
 
 
 class PredictionService:
     def __init__(
         self,
         config: PredictionConfig,
-        artifact_dir: str | Path = "models/artifacts",
-        metrics_path: str | Path = "reports/metrics.csv",
-        batch_csv_path: str | Path = "data/raw/batch_edge_aggregates.csv",
-        manifest_path: str | Path = "data/raw/scenarios/manifest.csv",
+        artifact_dir: str | Path | None = None,
+        metrics_path: str | Path | None = None,
+        batch_csv_path: str | Path | None = None,
+        manifest_path: str | Path | None = None,
     ):
         self.config = config
-        self.artifact_dir = Path(artifact_dir)
-        self.metrics_path = Path(metrics_path)
-        self.batch_csv_path = Path(batch_csv_path)
-        self.manifest_path = Path(manifest_path)
-        self.fallback_predictor = HistoricalAveragePredictor(config)
-        self.available_models = list(
-            dict.fromkeys([self.fallback_predictor.model_name, *discover_available_models(self.artifact_dir)])
+        self.artifact_dir = Path(artifact_dir or getattr(config, "artifact_dir", "models/artifacts"))
+        self.metrics_path = Path(metrics_path or getattr(config, "metrics_file", "reports/metrics.csv"))
+        self.batch_csv_path = Path(batch_csv_path or getattr(config, "batch_csv_file", "data/raw/batch_edge_aggregates.csv"))
+        self.manifest_path = Path(
+            manifest_path or getattr(config, "scenario_manifest_file", "data/raw/scenarios/manifest.csv")
         )
+        self.movement_config = self._load_movement_config()
+        self.fallback_predictor = HistoricalAveragePredictor(config)
         self.model_metrics = self._load_model_metrics()
         self._predictor_cache: dict[str, ArtifactPredictor] = {}
         self._manifest_cache: pd.DataFrame | None = None
@@ -41,6 +45,7 @@ class PredictionService:
         self.trained_predictor = ArtifactPredictor.load_best(config, self.artifact_dir)
         if self.trained_predictor is not None:
             self._predictor_cache[self.trained_predictor.model_name] = self.trained_predictor
+        self.available_models = self._discover_compatible_models()
         self.predictor = self.trained_predictor or self.fallback_predictor
         self.active_model = self.predictor.model_name
         self.history = deque(maxlen=config.history_steps)
@@ -60,9 +65,26 @@ class PredictionService:
             self.switch_model(registry_active_model)
 
     def config_payload(self) -> dict[str, Any]:
+        public_config = self.config.public_dict()
+        if self.movement_config:
+            movement_count = int(self.movement_config.get("movement_count", len(self.movement_config.get("movements", []))))
+            public_config["movement_count"] = movement_count
+            public_config["movement_summary"] = {
+                "turn_type_counts": self.movement_config.get("turn_type_counts", {}),
+                "observed_edges_without_movements": self.movement_config.get("observed_edges_without_movements", []),
+                "short_upstream_edges": self.movement_config.get("short_upstream_edges", []),
+            }
+            if public_config.get("observation_level") == "movement":
+                public_config["input_feature_count"] = (
+                    movement_count * len(public_config.get("per_movement_input_features", [])) + 2
+                )
         return {
             "status": "ok",
-            "config": self.config.public_dict(),
+            "config": public_config,
+            "control_features_enabled": True,
+            "input_feature_count": public_config["input_feature_count"],
+            "per_edge_input_features": public_config["per_edge_input_features"],
+            "per_movement_input_features": public_config.get("per_movement_input_features", []),
             "active_model": self.active_model,
             "available_models": self.available_models,
             "model_metrics": self.model_metrics,
@@ -80,6 +102,12 @@ class PredictionService:
             "prediction": self.latest_prediction,
             "history_size": len(self.history),
         }
+
+    def phase_aggregate_payload(self) -> dict[str, Any]:
+        return aggregate_predictions_by_phase(
+            self.latest_prediction,
+            self.movement_config,
+        )
 
     def update_observation(self, observation: dict[str, Any]) -> dict[str, Any]:
         self.latest_observation = observation
@@ -142,6 +170,7 @@ class PredictionService:
                 "seed": int(row.seed),
                 "demand_scale": float(row.demand_scale),
                 "base_demand_factor": float(row.base_demand_factor or self.config.base_demand_factor),
+                "signal_variant": str(getattr(row, "signal_variant", "webster_base") or "webster_base"),
             }
             for row in baseline_df.itertuples(index=False)
         ]
@@ -162,6 +191,7 @@ class PredictionService:
                     "seed": int(row.seed),
                     "demand_scale": float(row.demand_scale),
                     "base_demand_factor": float(row.base_demand_factor or self.config.base_demand_factor),
+                    "signal_variant": str(getattr(row, "signal_variant", "webster_base") or "webster_base"),
                     "incident_type": row.incident_type,
                     "incident_start_s": int(row.incident_start_s),
                     "incident_end_s": int(row.incident_end_s),
@@ -228,6 +258,14 @@ class PredictionService:
             "incident_run_id": request.incident_run_id,
             "affected_edges": affected_edges,
             "incident_type": str(incident_meta.get("incident_type") or ""),
+            "baseline_signal_variant": str(
+                manifest.loc[manifest["run_id"] == request.baseline_run_id]
+                .iloc[0]
+                .get("signal_variant", "webster_base")
+            )
+            if not manifest.loc[manifest["run_id"] == request.baseline_run_id].empty
+            else "webster_base",
+            "incident_signal_variant": str(incident_meta.get("signal_variant") or "webster_base"),
             "anchor_step": anchor_step,
             "baseline_pred": baseline_pred,
             "incident_pred": incident_pred,
@@ -286,26 +324,36 @@ class PredictionService:
 
         snapshots: list[dict[str, Any]] = []
         for (step, timestamp), group in run_df.groupby(["step", "timestamp"], sort=True):
-            by_edge = {row.edge_id: row for row in group.itertuples(index=False)}
-            if any(edge_id not in by_edge for edge_id in self.config.observed_edges):
-                continue
-            nodes = []
-            for edge_id in self.config.observed_edges:
-                row = by_edge[edge_id]
-                nodes.append(
-                    {
-                        "edge_id": edge_id,
-                        "flow": float(row.flow),
-                        "speed": float(row.speed_mps),
-                        "speed_mps": float(row.speed_mps),
-                        "queue": float(row.queue),
-                        "incident_flag": float(getattr(row, "incident_flag", 0.0) or 0.0),
-                    }
-                )
+            if "movement_id" in group.columns:
+                movements = [self._movement_row_to_payload(row) for row in group.itertuples(index=False)]
+                nodes = movement_rows_to_legacy_nodes(movements)
+            else:
+                by_edge = {row.edge_id: row for row in group.itertuples(index=False)}
+                if any(edge_id not in by_edge for edge_id in self.config.observed_edges):
+                    continue
+                nodes = []
+                for edge_id in self.config.observed_edges:
+                    row = by_edge[edge_id]
+                    nodes.append(
+                        {
+                            "edge_id": edge_id,
+                            "flow": float(row.flow),
+                            "speed": float(row.speed_mps),
+                            "speed_mps": float(row.speed_mps),
+                            "queue": float(row.queue),
+                            "incident_flag": self._safe_float(getattr(row, "incident_flag", 0.0), 0.0),
+                            **{
+                                column: self._safe_float(getattr(row, column, default), default)
+                                for column, default in CONTROL_FEATURE_DEFAULTS.items()
+                            },
+                        }
+                    )
+                movements = []
             snapshots.append(
                 {
                     "step": int(step),
                     "timestamp": str(timestamp),
+                    "movements": movements,
                     "nodes": nodes,
                 }
             )
@@ -431,6 +479,18 @@ class PredictionService:
             return {}
         return metrics
 
+    def _discover_compatible_models(self) -> list[str]:
+        models = [self.fallback_predictor.model_name]
+        for model_name in discover_available_models(self.artifact_dir):
+            predictor = self._predictor_cache.get(model_name)
+            if predictor is None:
+                predictor = ArtifactPredictor.load_named(self.config, self.artifact_dir, model_name)
+            if predictor is None:
+                continue
+            self._predictor_cache[model_name] = predictor
+            models.append(model_name)
+        return list(dict.fromkeys(models))
+
     def _load_manifest(self) -> pd.DataFrame | None:
         if not self.manifest_path.exists():
             return None
@@ -444,6 +504,7 @@ class PredictionService:
             "incident_start_s": 0,
             "incident_end_s": 0,
             "affected_edges": "",
+            "signal_variant": "webster_base",
         }.items():
             if column not in df.columns:
                 df[column] = default
@@ -457,19 +518,37 @@ class PredictionService:
         mtime = self.batch_csv_path.stat().st_mtime
         if self._batch_cache is not None and self._batch_cache_mtime == mtime:
             return self._batch_cache
-        df = pd.read_csv(self.batch_csv_path)
+        df = pd.read_csv(self.batch_csv_path, low_memory=False)
         if "incident_flag" not in df.columns:
             df["incident_flag"] = 0
+        if "signal_variant" not in df.columns:
+            df["signal_variant"] = "webster_base"
+        if "movement_id" in df.columns:
+            for column, default in {
+                "arrival_flow": 0.0,
+                "discharge_flow": 0.0,
+                "mean_speed_mps": 0.0,
+                "occupancy": 0.0,
+                "queue_veh": 0.0,
+                "queue_meter": 0.0,
+            }.items():
+                if column not in df.columns:
+                    df[column] = default
+        for column, default in CONTROL_FEATURE_DEFAULTS.items():
+            if column not in df.columns:
+                df[column] = default
         self._batch_cache = df
         self._batch_cache_mtime = mtime
         return df
 
     @staticmethod
-    def _safe_float(value: Any) -> float | None:
+    def _safe_float(value: Any, default: float | None = None) -> float | None:
         try:
+            if value is None or pd.isna(value):
+                return default
             return float(value)
         except (TypeError, ValueError):
-            return None
+            return default
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:
@@ -477,3 +556,35 @@ class PredictionService:
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    def _load_movement_config(self) -> dict[str, Any] | None:
+        path = Path(getattr(self.config, "movement_config_file", "configs/movement_config.json"))
+        if not path.exists():
+            return None
+        try:
+            return load_movement_config(path)
+        except Exception as exc:
+            print(f"Failed to load movement config {path}: {exc}")
+            return None
+
+    def _movement_row_to_payload(self, row: Any) -> dict[str, Any]:
+        return {
+            "movement_id": str(getattr(row, "movement_id")),
+            "tls_id": str(getattr(row, "tls_id", "")),
+            "incoming_edge": str(getattr(row, "incoming_edge", "")),
+            "outgoing_edge": str(getattr(row, "outgoing_edge", "")),
+            "turn_type": str(getattr(row, "turn_type", "")),
+            "arrival_flow": self._safe_float(getattr(row, "arrival_flow", 0.0), 0.0),
+            "discharge_flow": self._safe_float(getattr(row, "discharge_flow", 0.0), 0.0),
+            "mean_speed": self._safe_float(getattr(row, "mean_speed_mps", 0.0), 0.0),
+            "mean_speed_mps": self._safe_float(getattr(row, "mean_speed_mps", 0.0), 0.0),
+            "speed_kmh": self._safe_float(getattr(row, "speed_kmh", 0.0), 0.0),
+            "occupancy": self._safe_float(getattr(row, "occupancy", 0.0), 0.0),
+            "queue_veh": self._safe_float(getattr(row, "queue_veh", 0.0), 0.0),
+            "queue_meter": self._safe_float(getattr(row, "queue_meter", 0.0), 0.0),
+            "incident_flag": self._safe_float(getattr(row, "incident_flag", 0.0), 0.0),
+            **{
+                column: self._safe_float(getattr(row, column, default), default)
+                for column, default in CONTROL_FEATURE_DEFAULTS.items()
+            },
+        }

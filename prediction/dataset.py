@@ -11,14 +11,36 @@ import numpy as np
 import pandas as pd
 
 from .config import PredictionConfig
+from sim.movement_tools import load_movement_config
 
 
 TARGET_TO_COLUMN = {
     "flow": "flow",
     "speed": "speed_mps",
     "queue": "queue",
+    "arrival_flow": "arrival_flow",
+    "mean_speed": "mean_speed_mps",
+    "queue_veh": "queue_veh",
 }
 INCIDENT_COLUMN = "incident_flag"
+SIGNAL_VARIANT_COLUMN = "signal_variant"
+DEFAULT_SIGNAL_VARIANT = "webster_base"
+CONTROL_FEATURE_DEFAULTS = {
+    "phase_id": -1.0,
+    "phase_elapsed_s": 0.0,
+    "green_remaining_s": 0.0,
+}
+CONTROL_FEATURE_COLUMNS = list(CONTROL_FEATURE_DEFAULTS.keys())
+MOVEMENT_INPUT_FEATURES = [
+    "arrival_flow",
+    "discharge_flow",
+    "mean_speed",
+    "occupancy",
+    "queue_veh",
+    "queue_meter",
+    INCIDENT_COLUMN,
+    *CONTROL_FEATURE_COLUMNS,
+]
 
 
 @dataclass
@@ -41,6 +63,10 @@ class DatasetBundle:
     sample_target_steps: np.ndarray
     sample_target_timestamps: np.ndarray
     sample_incident_flags: np.ndarray
+    sample_signal_variants: np.ndarray
+    control_features_enabled: bool = True
+    observation_level: str = "edge"
+    entity_metadata: dict[str, dict[str, Any]] | None = None
 
     def save(self, output_dir: str | Path) -> None:
         out = Path(output_dir)
@@ -61,12 +87,17 @@ class DatasetBundle:
             sample_target_steps=self.sample_target_steps,
             sample_target_timestamps=self.sample_target_timestamps,
             sample_incident_flags=self.sample_incident_flags,
+            sample_signal_variants=self.sample_signal_variants,
         )
         metadata = {
             "feature_names": self.feature_names,
             "target_feature_names": self.target_feature_names,
             "edge_ids": self.edge_ids,
+            "entity_ids": self.edge_ids,
             "targets": self.targets,
+            "control_features_enabled": self.control_features_enabled,
+            "observation_level": self.observation_level,
+            "entity_metadata": self.entity_metadata or {},
             "shape": {"X": list(self.X.shape), "y": list(self.y.shape)},
             "splits": {
                 "train": self.train_idx.tolist(),
@@ -103,6 +134,12 @@ class DatasetBundle:
             sample_target_steps=arrays["sample_target_steps"],
             sample_target_timestamps=arrays["sample_target_timestamps"],
             sample_incident_flags=arrays["sample_incident_flags"],
+            sample_signal_variants=arrays["sample_signal_variants"]
+            if "sample_signal_variants" in arrays
+            else np.asarray([DEFAULT_SIGNAL_VARIANT for _ in arrays["sample_run_ids"]]),
+            control_features_enabled=bool(metadata.get("control_features_enabled", True)),
+            observation_level=str(metadata.get("observation_level", "edge")),
+            entity_metadata=metadata.get("entity_metadata", {}),
         )
 
     def metadata_for_artifact(self) -> dict[str, Any]:
@@ -110,7 +147,10 @@ class DatasetBundle:
             "feature_names": self.feature_names,
             "target_feature_names": self.target_feature_names,
             "edge_ids": self.edge_ids,
+            "entity_ids": self.edge_ids,
             "targets": self.targets,
+            "observation_level": self.observation_level,
+            "entity_metadata": self.entity_metadata or {},
             "x_mean": self.x_mean.tolist(),
             "x_std": self.x_std.tolist(),
             "y_mean": self.y_mean.tolist(),
@@ -125,31 +165,36 @@ class DatasetBundle:
 def build_dataset_from_csv(
     csv_path: str | Path,
     config: PredictionConfig,
+    include_control_features: bool = True,
 ) -> DatasetBundle:
-    df = pd.read_csv(csv_path)
-    required = {
-        "run_id",
-        "scenario_id",
-        "timestamp",
-        "step",
-        "edge_id",
-        "flow",
-        "speed_mps",
-        "queue",
-        "incident_flag",
-    }
+    df = pd.read_csv(csv_path, low_memory=False)
+    observation_level = "movement" if "movement_id" in df.columns else "edge"
+    entity_col = "movement_id" if observation_level == "movement" else "edge_id"
+    required = {"run_id", "scenario_id", "timestamp", "step", entity_col}
+    if observation_level == "movement":
+        required.update({"arrival_flow", "mean_speed_mps", "queue_veh"})
+    else:
+        required.update({"flow", "speed_mps", "queue"})
     missing = sorted(required - set(df.columns))
     if missing:
         raise ValueError(f"CSV missing required columns: {', '.join(missing)}")
+    if INCIDENT_COLUMN not in df.columns:
+        df[INCIDENT_COLUMN] = 0.0
+    if SIGNAL_VARIANT_COLUMN not in df.columns:
+        df[SIGNAL_VARIANT_COLUMN] = DEFAULT_SIGNAL_VARIANT
+    for column, default in CONTROL_FEATURE_DEFAULTS.items():
+        if column not in df.columns:
+            df[column] = default
 
-    edge_ids = list(config.observed_edges)
+    entity_ids, entity_metadata = resolve_entities(config, df, observation_level)
     targets = list(config.targets)
+    input_features = resolve_input_features(targets, observation_level, include_control_features)
     feature_names = [
-        f"{edge_id}__{feature}"
-        for edge_id in edge_ids
-        for feature in [*targets, INCIDENT_COLUMN]
+        f"{entity_id}__{feature}"
+        for entity_id in entity_ids
+        for feature in input_features
     ] + ["tod_sin", "tod_cos"]
-    target_feature_names = [f"{edge_id}__{target}" for edge_id in edge_ids for target in targets]
+    target_feature_names = [f"{entity_id}__{target}" for entity_id in entity_ids for target in targets]
 
     L = config.history_steps
     H = config.horizon_steps
@@ -161,6 +206,7 @@ def build_dataset_from_csv(
     sample_target_steps: list[int] = []
     sample_target_timestamps: list[str] = []
     sample_incident_flags: list[bool] = []
+    sample_signal_variants: list[str] = []
     run_snapshot_counts: dict[str, int] = {}
     run_window_counts: dict[str, int] = {}
 
@@ -170,29 +216,35 @@ def build_dataset_from_csv(
         snapshot_steps: list[int] = []
         snapshot_timestamps: list[str] = []
         snapshot_incident_flags: list[bool] = []
+        snapshot_signal_variants: list[str] = []
         snapshot_scenario_id = ""
 
         for _, group in run_df.groupby(["step", "timestamp"], sort=True):
-            by_edge = {row.edge_id: row for row in group.itertuples(index=False)}
-            if any(edge_id not in by_edge for edge_id in edge_ids):
+            by_entity = {
+                str(getattr(row, entity_col)): row
+                for row in group.itertuples(index=False)
+            }
+            if any(entity_id not in by_entity for entity_id in entity_ids):
                 continue
 
             timestamp = str(group.iloc[0]["timestamp"])
             tod_sin, tod_cos = encode_time_of_day(timestamp)
             snapshot_scenario_id = str(group.iloc[0]["scenario_id"])
+            signal_variant = str(group.iloc[0].get(SIGNAL_VARIANT_COLUMN, DEFAULT_SIGNAL_VARIANT))
             input_values: list[float] = []
             output_values: list[float] = []
             incident_any = False
 
-            for edge_id in edge_ids:
-                row = by_edge[edge_id]
+            for entity_id in entity_ids:
+                row = by_entity[entity_id]
+                for feature in input_features:
+                    value = _safe_float(getattr(row, column_for_feature(feature), 0.0), 0.0)
+                    input_values.append(value)
+                    if feature == INCIDENT_COLUMN:
+                        incident_any = incident_any or value > 0.0
                 for target in targets:
                     value = float(getattr(row, TARGET_TO_COLUMN[target]))
-                    input_values.append(value)
                     output_values.append(value)
-                incident_value = float(getattr(row, INCIDENT_COLUMN, 0.0) or 0.0)
-                input_values.append(incident_value)
-                incident_any = incident_any or incident_value > 0.0
 
             input_values.extend([tod_sin, tod_cos])
             input_snapshots.append(np.asarray(input_values, dtype=np.float32))
@@ -200,6 +252,7 @@ def build_dataset_from_csv(
             snapshot_steps.append(int(group.iloc[0]["step"]))
             snapshot_timestamps.append(timestamp)
             snapshot_incident_flags.append(incident_any)
+            snapshot_signal_variants.append(signal_variant)
 
         run_snapshot_counts[str(run_id)] = len(input_snapshots)
         if len(input_snapshots) < L + H:
@@ -218,6 +271,13 @@ def build_dataset_from_csv(
             sample_target_steps.append(int(snapshot_steps[target_start]))
             sample_target_timestamps.append(str(snapshot_timestamps[target_start]))
             sample_incident_flags.append(any(snapshot_incident_flags[target_start : target_start + H]))
+            target_variants = snapshot_signal_variants[target_start : target_start + H]
+            sample_signal_variants.append(
+                next(
+                    (variant for variant in target_variants if variant != DEFAULT_SIGNAL_VARIANT),
+                    target_variants[0] if target_variants else DEFAULT_SIGNAL_VARIANT,
+                )
+            )
             window_count += 1
         run_window_counts[str(run_id)] = window_count
 
@@ -237,6 +297,7 @@ def build_dataset_from_csv(
     sample_target_steps_arr = np.asarray(sample_target_steps, dtype=np.int64)
     sample_target_timestamps_arr = np.asarray(sample_target_timestamps)
     sample_incident_flags_arr = np.asarray(sample_incident_flags, dtype=bool)
+    sample_signal_variants_arr = np.asarray(sample_signal_variants)
 
     train_idx, val_idx, test_idx = split_indices_by_run(
         sample_run_ids_arr,
@@ -257,7 +318,7 @@ def build_dataset_from_csv(
         y=y_arr,
         feature_names=feature_names,
         target_feature_names=target_feature_names,
-        edge_ids=edge_ids,
+        edge_ids=entity_ids,
         targets=targets,
         x_mean=x_mean,
         x_std=x_std,
@@ -271,7 +332,73 @@ def build_dataset_from_csv(
         sample_target_steps=sample_target_steps_arr,
         sample_target_timestamps=sample_target_timestamps_arr,
         sample_incident_flags=sample_incident_flags_arr,
+        sample_signal_variants=sample_signal_variants_arr,
+        control_features_enabled=include_control_features,
+        observation_level=observation_level,
+        entity_metadata=entity_metadata,
     )
+
+
+def resolve_entities(
+    config: PredictionConfig,
+    df: pd.DataFrame,
+    observation_level: str,
+) -> tuple[list[str], dict[str, dict[str, Any]]]:
+    if observation_level == "movement":
+        movement_path = Path(getattr(config, "movement_config_file", "configs/movement_config.json"))
+        if movement_path.exists():
+            payload = load_movement_config(movement_path)
+            movements = list(payload.get("movements", []))
+            movement_ids = [str(movement["movement_id"]) for movement in movements]
+            movement_ids = [
+                movement_id
+                for movement_id in movement_ids
+                if movement_id in set(df["movement_id"].astype(str).tolist())
+            ]
+            metadata = {
+                str(movement["movement_id"]): {
+                    "tls_id": movement.get("tls_id", ""),
+                    "incoming_edge": movement.get("incoming_edge", ""),
+                    "outgoing_edge": movement.get("outgoing_edge", ""),
+                    "turn_type": movement.get("turn_type", ""),
+                    "lane_ids": movement.get("lane_ids", []),
+                    "link_index": movement.get("link_index", -1),
+                    "zone_quality": movement.get("zone_quality", ""),
+                }
+                for movement in movements
+            }
+            return movement_ids, metadata
+        movement_ids = sorted(df["movement_id"].astype(str).unique().tolist())
+        metadata = {
+            movement_id: {"movement_id": movement_id}
+            for movement_id in movement_ids
+        }
+        return movement_ids, metadata
+
+    return list(config.observed_edges), {}
+
+
+def resolve_input_features(
+    targets: list[str],
+    observation_level: str,
+    include_control_features: bool,
+) -> list[str]:
+    if observation_level == "movement":
+        features = [
+            feature
+            for feature in MOVEMENT_INPUT_FEATURES
+            if include_control_features or feature not in CONTROL_FEATURE_COLUMNS
+        ]
+        return features
+    return [
+        *targets,
+        INCIDENT_COLUMN,
+        *(CONTROL_FEATURE_COLUMNS if include_control_features else []),
+    ]
+
+
+def column_for_feature(feature: str) -> str:
+    return TARGET_TO_COLUMN.get(feature, feature)
 
 
 def split_indices_by_run(
@@ -354,25 +481,21 @@ def window_to_matrix(
     edge_ids: list[str],
     targets: list[str],
     config: PredictionConfig,
+    feature_names: list[str] | None = None,
 ) -> np.ndarray:
     rows: list[list[float]] = []
     inferred_start = datetime.fromisoformat(config.simulation_start_iso)
     for step_index, raw_step in enumerate(window):
         step = _as_dict(raw_step)
-        by_edge = {
+        by_node = {
             _as_dict(node).get("edge_id"): _as_dict(node)
             for node in step.get("nodes", [])
         }
-        values: list[float] = []
-        for edge_id in edge_ids:
-            node = by_edge.get(edge_id, {})
-            for target in targets:
-                value = node.get(target)
-                if target == "speed" and value is None:
-                    value = node.get("speed_mps")
-                values.append(float(value or 0.0))
-            values.append(float(node.get("incident_flag") or 0.0))
-
+        by_movement = {
+            _as_dict(movement).get("movement_id"): _as_dict(movement)
+            for movement in step.get("movements", [])
+        }
+        by_entity = {**by_node, **by_movement}
         timestamp = step.get("timestamp")
         if timestamp:
             tod_sin, tod_cos = encode_time_of_day(str(timestamp))
@@ -381,7 +504,26 @@ def window_to_matrix(
                 seconds=step_index * config.sample_interval_s
             )
             tod_sin, tod_cos = encode_time_of_day(inferred_timestamp.isoformat())
-        values.extend([tod_sin, tod_cos])
+
+        if feature_names:
+            values = _values_from_feature_names(
+                feature_names,
+                by_entity,
+                targets,
+                tod_sin,
+                tod_cos,
+            )
+        else:
+            values = []
+            for edge_id in edge_ids:
+                node = by_entity.get(edge_id, {})
+                for target in targets:
+                    value = value_from_entity(node, target)
+                    values.append(float(value or 0.0))
+                values.append(_safe_float(node.get(INCIDENT_COLUMN), 0.0))
+                for column, default in CONTROL_FEATURE_DEFAULTS.items():
+                    values.append(_safe_float(node.get(column, default), default))
+            values.extend([tod_sin, tod_cos])
         rows.append(values)
     return np.asarray(rows, dtype=np.float32)
 
@@ -392,6 +534,8 @@ def matrix_to_prediction_payload(
     targets: list[str],
     model_name: str,
     horizon: int | None = None,
+    observation_level: str = "edge",
+    entity_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if y.ndim != 2:
         raise ValueError(f"Expected y with shape [H, O], got {y.shape}")
@@ -402,21 +546,84 @@ def matrix_to_prediction_payload(
         pad = np.repeat(y[-1:, :], horizon_steps - y.shape[0], axis=0)
         y_out = np.concatenate([y, pad], axis=0)
 
+    entity_metadata = entity_metadata or {}
     nodes = []
+    movements = []
     width = len(targets)
-    for edge_index, edge_id in enumerate(edge_ids):
-        node_payload: dict[str, Any] = {"edge_id": edge_id}
-        offset = edge_index * width
-        for target_index, target in enumerate(targets):
-            values = y_out[:, offset + target_index]
-            node_payload[f"pred_{target}"] = [float(v) for v in values]
-        nodes.append(node_payload)
+    if observation_level == "movement":
+        edge_acc: dict[str, dict[str, Any]] = {}
+        for entity_index, movement_id in enumerate(edge_ids):
+            meta = entity_metadata.get(movement_id, {})
+            movement_payload: dict[str, Any] = {
+                "movement_id": movement_id,
+                "incoming_edge": meta.get("incoming_edge", ""),
+                "outgoing_edge": meta.get("outgoing_edge", ""),
+                "turn_type": meta.get("turn_type", ""),
+                "tls_id": meta.get("tls_id", ""),
+            }
+            offset = entity_index * width
+            target_arrays: dict[str, np.ndarray] = {}
+            for target_index, target in enumerate(targets):
+                values = y_out[:, offset + target_index].astype(float)
+                target_arrays[target] = values
+                movement_payload[f"pred_{target}"] = [float(v) for v in values]
+            movements.append(movement_payload)
 
-    return {
+            edge_id = str(meta.get("incoming_edge") or movement_id)
+            edge_payload = edge_acc.setdefault(
+                edge_id,
+                {
+                    "edge_id": edge_id,
+                    "pred_flow": np.zeros(horizon_steps, dtype=np.float32),
+                    "_speed_values": [],
+                    "pred_queue": np.zeros(horizon_steps, dtype=np.float32),
+                },
+            )
+            if "arrival_flow" in target_arrays:
+                edge_payload["pred_flow"] += target_arrays["arrival_flow"]
+            elif "flow" in target_arrays:
+                edge_payload["pred_flow"] += target_arrays["flow"]
+            if "mean_speed" in target_arrays:
+                edge_payload["_speed_values"].append(target_arrays["mean_speed"])
+            elif "speed" in target_arrays:
+                edge_payload["_speed_values"].append(target_arrays["speed"])
+            if "queue_veh" in target_arrays:
+                edge_payload["pred_queue"] += target_arrays["queue_veh"]
+            elif "queue" in target_arrays:
+                edge_payload["pred_queue"] += target_arrays["queue"]
+
+        for edge_payload in edge_acc.values():
+            speed_values = edge_payload.pop("_speed_values")
+            if speed_values:
+                edge_payload["pred_speed"] = np.mean(np.stack(speed_values, axis=0), axis=0)
+            else:
+                edge_payload["pred_speed"] = np.zeros(horizon_steps, dtype=np.float32)
+            nodes.append(
+                {
+                    "edge_id": edge_payload["edge_id"],
+                    "pred_flow": [float(v) for v in edge_payload["pred_flow"]],
+                    "pred_speed": [float(v) for v in edge_payload["pred_speed"]],
+                    "pred_queue": [float(v) for v in edge_payload["pred_queue"]],
+                }
+            )
+    else:
+        for edge_index, edge_id in enumerate(edge_ids):
+            node_payload: dict[str, Any] = {"edge_id": edge_id}
+            offset = edge_index * width
+            for target_index, target in enumerate(targets):
+                values = y_out[:, offset + target_index]
+                node_payload[f"pred_{target}"] = [float(v) for v in values]
+            nodes.append(node_payload)
+
+    payload = {
         "model": model_name,
         "horizon": list(range(1, horizon_steps + 1)),
         "nodes": nodes,
     }
+    if observation_level == "movement":
+        payload["movements"] = movements
+        payload["observation_level"] = "movement"
+    return payload
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -425,3 +632,60 @@ def _as_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "dict"):
         return value.dict()
     return dict(value)
+
+
+def _values_from_feature_names(
+    feature_names: list[str],
+    by_edge: dict[str | None, dict[str, Any]],
+    targets: list[str],
+    tod_sin: float,
+    tod_cos: float,
+) -> list[float]:
+    values: list[float] = []
+    for feature_name in feature_names:
+        if feature_name == "tod_sin":
+            values.append(float(tod_sin))
+            continue
+        if feature_name == "tod_cos":
+            values.append(float(tod_cos))
+            continue
+        if "__" not in feature_name:
+            values.append(0.0)
+            continue
+
+        edge_id, feature = feature_name.rsplit("__", 1)
+        node = by_edge.get(edge_id, {})
+        if feature in targets:
+            value = value_from_entity(node, feature)
+            values.append(_safe_float(value, 0.0))
+        elif feature == INCIDENT_COLUMN:
+            values.append(_safe_float(node.get(INCIDENT_COLUMN), 0.0))
+        elif feature in CONTROL_FEATURE_DEFAULTS:
+            values.append(_safe_float(node.get(feature), CONTROL_FEATURE_DEFAULTS[feature]))
+        else:
+            values.append(_safe_float(value_from_entity(node, feature), 0.0))
+    return values
+
+
+def value_from_entity(node: dict[str, Any], feature: str) -> Any:
+    value = node.get(feature)
+    if value is not None:
+        return value
+    if feature == "speed":
+        return node.get("speed_mps")
+    if feature == "mean_speed":
+        return node.get("mean_speed_mps", node.get("speed_mps"))
+    if feature == "queue":
+        return node.get("queue_veh", node.get("queue"))
+    if feature == "flow":
+        return node.get("arrival_flow", node.get("flow"))
+    return node.get(column_for_feature(feature))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or pd.isna(value):
+            return float(default)
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)

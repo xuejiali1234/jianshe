@@ -1,0 +1,623 @@
+仓库地址我这边没有成功打开，可能是仓库未公开或链接权限限制；下面我按你们当前的 SUMO 数字孪生基座、交通流预测 + 强化学习信号控制 + 事故推演任务来给处理方案。
+
+先给结论：
+
+**不要直接用交叉口前最后一小段 SUMO edge 作为主要预测检测路段。**
+这段短 edge 可以作为“停止线/放行量检测点”，但不适合作为完整进口道状态。你们应该把“进口道”重新定义成一个**功能性进口道检测区**：从停止线上游向后延伸 80–150 m，跨越 SUMO 中多个连续 lane/edge，统一提取流量、速度、排队、占有率等状态。
+
+**左转、直行、右转数据不要合并成一个总量，也不建议一开始完全分开训练。**
+最佳做法是：**分通道采集，统一训练，多输出预测。**
+也就是说，左转、直行、右转分别作为不同 movement node，进入同一个 Transformer 模型。模型输出未来各进口道、各转向流量/排队/速度。这样后期给信号控制使用时，能直接按相位聚合。
+
+---
+
+## 1. 交叉口进口道很短，确实会影响预测，但影响的是“状态表达”，不是单纯计数
+
+如果你只想数“多少车通过了某个断面”，短 edge 上放一个 E1 感应线圈不一定错。SUMO 的 E1 induction loop 是按 lane 和 pos 放置的，能按 period 聚合输出 flow、speed、nVehEntered 等指标。SUMO 文档里也明确说明，E1 检测器通过 `lane` 和 `pos` 指定位置，`period` 指定聚合周期，并输出车辆数、流量、速度、占有率等信息。([Eclipse SUMO][1])
+
+但你们现在要做的是**短时交通流预测 + 信号控制输入**，这时候短 edge 会带来几个问题：
+
+1. **它更像停止线前的瞬时断面，不代表整个进口道状态。**
+   如果信号是红灯，车辆会排在更上游，最后这段短 edge 可能很快被占满，无法反映完整排队长度。
+
+2. **它测到的可能是“放行量”，不是“到达需求”。**
+   如果检测器离停止线太近，绿灯时通过量高、红灯时通过量低，这个流量已经被信号灯控制影响了。用它训练预测模型，模型会学到“当前配时下的放行结果”，而不是“未来到达需求”。
+
+3. **速度、占有率、密度会很不稳定。**
+   短 edge 长度小，车辆驻留时间短，60 秒聚合下少量车辆就能造成指标剧烈波动。若用 edgeData/laneData，SUMO 输出的密度、速度、占有率等是针对 lane 或 edge 聚合的宏观状态，短边会让这些指标更容易受局部停车和放行波动影响。([Eclipse SUMO][2])
+
+所以，**最后一小段 edge 不能当作唯一状态源**。它可以保留，但角色要改。
+
+---
+
+## 2. 推荐把检测体系拆成三层：到达流、排队区、停止线放行
+
+你们后期要接 RL 信号控制，所以最好一开始就按信号控制需要设计检测器，而不是只放一个进口道流量检测器。
+
+### A. 上游到达流检测器：预测“需求”
+
+这个检测器放在停止线上游 50–100 m，最好不要贴着路口。它用于估计未来到达需求。
+
+如果路网中最后一个进口 edge 太短，就不要把检测器放在这个短 edge 上，而是放在它的上游 predecessor edge 上。若要区分左转/直行/右转，可用 `nextEdges` 按车辆未来路径过滤。SUMO 的 E1 检测器支持 `nextEdges`，可以只统计未来路线包含指定 edge 的车辆。([Eclipse SUMO][1])
+
+示意：
+
+```xml
+<additional>
+    <!-- 东进口左转到达需求：放在停止线上游约80m -->
+    <inductionLoop
+        id="EB_L_arrival"
+        lane="upstream_EB_0"
+        pos="-80"
+        period="60"
+        file="det_e1_arrival.xml"
+        nextEdges="EB_left_out"
+        friendlyPos="true"/>
+
+    <!-- 东进口直行到达需求 -->
+    <inductionLoop
+        id="EB_T_arrival"
+        lane="upstream_EB_1"
+        pos="-80"
+        period="60"
+        file="det_e1_arrival.xml"
+        nextEdges="EB_through_out"
+        friendlyPos="true"/>
+</additional>
+```
+
+这里的核心不是 XML 细节，而是逻辑：
+**预测模型要优先学习“上游到达需求”，不是只学习停止线放行量。**
+
+---
+
+### B. 排队区检测器：预测“拥堵状态”
+
+排队长度、停车时间、占有率这些指标，不适合用一个点检测器解决。建议用 E2 laneAreaDetector，也就是“区域检测器”。SUMO 文档说明，E2 是沿 lane 或连续 lanes 覆盖一个区域的检测器，输出尤其适合测量 standing/jammed vehicles，也就是停车、排队和拥堵相关指标。([Eclipse SUMO][3])
+
+你们可以把 E2 设置成从停止线上游延伸 100–150 m 的区域。SUMO 的 E2 检测器支持用 `lane + endPos + length` 定义区域；当给定 endPos 和 length 时，检测区可以向上游延伸。文档也说明，E2 可通过 `length`、`pos/endPos` 或连续 `lanes` 定义区域。([Eclipse SUMO][3])
+
+示意：
+
+```xml
+<additional>
+    <!-- 东进口左转排队区，向停止线上游延伸120m -->
+    <laneAreaDetector
+        id="EB_L_queue"
+        lane="short_EB_0"
+        endPos="-5"
+        length="120"
+        period="60"
+        file="det_e2_queue.xml"
+        nextEdges="EB_left_out"
+        friendlyPos="true"
+        timeThreshold="1"
+        speedThreshold="0.1"
+        jamThreshold="10"/>
+
+    <!-- 东进口直行排队区 -->
+    <laneAreaDetector
+        id="EB_T_queue"
+        lane="short_EB_1"
+        endPos="-5"
+        length="120"
+        period="60"
+        file="det_e2_queue.xml"
+        nextEdges="EB_through_out"
+        friendlyPos="true"
+        timeThreshold="1"
+        speedThreshold="0.1"
+        jamThreshold="10"/>
+</additional>
+```
+
+E2 的输出里会有 `meanVehicleNumber`、`maxVehicleNumber`、`meanMaxJamLengthInVehicles`、`meanMaxJamLengthInMeters`、`maxJamLengthInMeters`、`meanHaltingDuration` 等指标，这些比单纯进口道流量更适合作为信号控制状态。([Eclipse SUMO][3])
+
+注意一点：如果 SUMO 自动向上游延伸时遇到多分叉，可能会出现检测区选择不符合你预期的问题。工程上更稳妥的做法是：**用脚本显式指定连续 lane 序列**，例如：
+
+```xml
+<laneAreaDetector
+    id="EB_T_queue"
+    lanes="upstream_EB_1 short_EB_1"
+    pos="0"
+    endPos="-5"
+    period="60"
+    file="det_e2_queue.xml"/>
+```
+
+前提是这些 lanes 在车辆行驶方向上连续。SUMO 文档明确要求，用 `lanes` 指定 E2 区域时，这些 lanes 必须形成连续序列。([Eclipse SUMO][3])
+
+---
+
+### C. 停止线放行检测器：给控制效果评价用
+
+停止线前 2–5 m 可以放 E1，用来统计每个相位实际放行了多少车。这个指标不建议作为唯一预测标签，但很适合作为：
+
+* 信号控制效果评价；
+* 饱和流率估计；
+* RL reward 中“通过车辆数”；
+* 事故推演中的通行能力下降指标。
+
+示意：
+
+```xml
+<inductionLoop
+    id="EB_T_stopbar"
+    lane="short_EB_1"
+    pos="-3"
+    period="60"
+    file="det_e1_stopbar.xml"
+    nextEdges="EB_through_out"
+    friendlyPos="true"/>
+```
+
+这样你们会同时有：
+
+```text
+上游到达流 arrival_flow：代表需求
+排队区 queue_state：代表拥堵状态
+停止线放行 discharge_flow：代表控制结果
+```
+
+这三个不要混为一谈。
+
+---
+
+## 3. 左转、直行、右转怎么检测：优先按“movement”而不是按 lane
+
+你们后期要做信号灯控制，真正有用的不是“某条 lane 的总流量”，而是：
+
+```text
+东进口左转
+东进口直行
+东进口右转
+西进口左转
+西进口直行
+西进口右转
+南进口左转
+……
+```
+
+这个单位叫 **movement**，也就是“进口方向 × 转向方向”。
+
+在 SUMO 里，如果左转、直行、右转是专用车道，按 lane 检测也能近似区分。但如果存在共享车道，例如“左转+直行共用一条车道”，单纯 lane 检测就区分不了车辆实际意图。这时候要用路线过滤。
+
+最实用的做法是：
+
+```text
+movement_id = 当前进口方向 + 车辆未来出口 edge
+```
+
+例如：
+
+```text
+EB_L = 东进口进入，未来走北向出口 edge
+EB_T = 东进口进入，未来走西向出口 edge
+EB_R = 东进口进入，未来走南向出口 edge
+```
+
+SUMO 的 E1、E2、E3 检测器都提供了类似的路线过滤能力，E1/E2/E3 文档中均列出了 `nextEdges` 属性，用于只统计未来路线包含指定 edge 的车辆。([Eclipse SUMO][1])
+
+如果你们要进一步统计某个 movement 穿越交叉口的旅行时间，可以用 E3 entryExitDetector。E3 由入口检测断面和出口检测断面组成，用来统计车辆穿过某个区域的平均旅行时间、平均速度、停车次数、区域内车辆数等。([Eclipse SUMO][4])
+
+示意：
+
+```xml
+<additional>
+    <entryExitDetector
+        id="EB_L_tt"
+        period="60"
+        file="det_e3_travel_time.xml"
+        openEntry="true">
+        <detEntry lane="upstream_EB_0" pos="-100" friendlyPos="true"/>
+        <detExit lane="north_out_0" pos="10" friendlyPos="true"/>
+    </entryExitDetector>
+</additional>
+```
+
+E3 特别适合事故推演，因为事故前后可以比较同一 movement 的 travel time、halting、duration 等变化。SUMO 文档中也说明，E3 会输出 `meanTravelTime`、`meanSpeed`、`meanHaltsPerVehicle`、`vehicleSum`、`meanDurationWithin` 等指标。([Eclipse SUMO][4])
+
+---
+
+## 4. 训练时不要把左转/直行/右转合并，也不要一开始分开训练
+
+你的问题里最关键的是这句：
+“直行、左转等不同进口道数据一起训练吗，还是分开？”
+
+我的建议非常明确：
+
+> **数据分开记录，模型一起训练，输出分开预测。**
+
+不要做这两种极端方案：
+
+**错误方案 1：把左转、直行、右转加总成一个进口道总流量。**
+这样会丢失信号控制最需要的信息。比如左转排队很长，但直行很通畅，如果你只给模型一个总流量，后期 RL 控制器无法判断到底应该给左转保护相位，还是给直行绿灯。
+
+**错误方案 2：每个转向单独训练一个模型。**
+这样会丢失空间关联和相位关联。实际交通中，左转、直行、右转不是独立的：它们共享进口道空间、共享红绿灯周期、共享排队回溢影响。分开训练会让模型看不到这些耦合关系。
+
+正确方案是：
+**把每个 movement 当成一个节点/通道，使用一个统一的多变量 Transformer。**
+
+---
+
+## 5. 推荐的数据张量设计
+
+假设一个四岔路口，每个进口道分左、直、右，共 12 个 movement：
+
+```text
+N = 12
+
+EB_L, EB_T, EB_R
+WB_L, WB_T, WB_R
+NB_L, NB_T, NB_R
+SB_L, SB_T, SB_R
+```
+
+每个 movement 每 60 秒生成一组特征：
+
+```text
+flow_arrival        上游到达流量
+flow_discharge      停止线放行量
+mean_speed          平均速度
+occupancy           占有率
+queue_veh           排队车辆数
+queue_meter         排队长度
+halt_count          停车次数或停车车辆数
+signal_state        当前是否绿灯
+green_remaining     剩余绿灯时间
+phase_id            当前相位
+incident_flag       是否事故场景
+```
+
+那么 Transformer 输入可以定义为：
+
+```text
+X ∈ R[B, T_in, N, F]
+```
+
+含义是：
+
+```text
+B      batch size
+T_in   输入历史窗口，例如过去 15 分钟，即 15 个 60s step
+N      movement 数，例如 12
+F      每个 movement 的特征数
+```
+
+预测输出：
+
+```text
+Y ∈ R[B, H, N, K]
+```
+
+含义是：
+
+```text
+H      预测未来窗口，例如未来 5/10/15 分钟
+K      每个 movement 的预测目标数，例如 flow、queue、speed
+```
+
+你们的首版目标可以设为：
+
+```text
+输入：过去 15 分钟
+输出：未来 5 分钟、10 分钟、15 分钟
+目标：arrival_flow + queue_veh + mean_speed
+```
+
+不要一开始预测太多。先把这三个打稳，后面再加碳排、延误、冲突风险。
+
+---
+
+## 6. Transformer 怎么组织：首版建议用“共享编码器 + movement embedding”
+
+首版不要做得太复杂。建议这样：
+
+```text
+每个 movement 的特征
+        ↓
+线性映射到 embedding
+        ↓
+加入时间位置编码
+        ↓
+加入 movement_id embedding
+        ↓
+加入 approach_id / turn_type / phase_id embedding
+        ↓
+Transformer Encoder
+        ↓
+多步预测头
+        ↓
+输出每个 movement 的未来 flow / queue / speed
+```
+
+核心思想是：
+
+* `movement_id embedding` 让模型知道这是哪个方向、哪个转向；
+* `turn_type embedding` 让模型知道这是左转、直行还是右转；
+* `phase_id embedding` 让模型知道这个 movement 受哪个信号相位控制；
+* 所有 movement 共用一个模型，学习交叉口整体时空耦合。
+
+首版结构可以写成：
+
+```text
+Input:
+    X: [B, T, N, F]
+
+Embedding:
+    z = Linear(X)
+    z = z + TimeEmbedding + MovementEmbedding + TurnEmbedding + PhaseEmbedding
+
+Encoder:
+    TransformerEncoder(z)
+
+Head:
+    Linear → [B, H, N, K]
+```
+
+如果你们开发时间紧，可以先把 `N × F` flatten 成一个时间步向量：
+
+```text
+X_flat ∈ R[B, T, N*F]
+```
+
+然后做普通时间序列 Transformer：
+
+```text
+Transformer 输入：[B, T, N*F]
+Transformer 输出：[B, H, N*K]
+```
+
+这个是 MVP 版本，工程最快。
+等 MVP 跑通后，再改成真正的 `T × N` 时空 Transformer。
+
+---
+
+## 7. 给信号控制使用时，预测结果怎么汇总
+
+信号控制不是直接控制“左转/直行/右转”三个标签，而是控制相位。你们应该在数据结构里维护一个映射表：
+
+```text
+movement_id → phase_id
+```
+
+例如：
+
+```text
+phase_1: EB_T + WB_T
+phase_2: EB_L + WB_L
+phase_3: NB_T + SB_T
+phase_4: NB_L + SB_L
+```
+
+Transformer 输出未来每个 movement 的预测后，再聚合成相位需求：
+
+```text
+phase_demand(t+h) = Σ predicted_flow(movement, t+h)
+phase_queue(t+h)  = Σ predicted_queue(movement, t+h)
+```
+
+然后给 RL 控制器：
+
+```text
+state = [
+    current_queue_by_phase,
+    current_flow_by_phase,
+    predicted_queue_by_phase_5min,
+    predicted_flow_by_phase_5min,
+    current_signal_phase,
+    elapsed_green_time
+]
+```
+
+也就是说，模型训练时保留 movement 级别；进入 RL 时按 phase 聚合。
+
+---
+
+## 8. 检测器布设建议：你们当前最该落地的是这套
+
+### 每个 movement 至少 3 类检测器
+
+```text
+1. arrival detector
+   位置：停止线上游 50–100m
+   用途：预测需求
+
+2. queue detector
+   位置：停止线上游 0–120m 区域
+   用途：预测排队与拥堵
+
+3. stopbar detector
+   位置：停止线前 2–5m
+   用途：统计放行量、评价信号控制效果
+```
+
+### 每个交叉口最好生成这个检测表
+
+```text
+detector_id
+approach_id
+turn_type
+movement_id
+phase_id
+lane_id
+upstream_lane_chain
+next_edges
+detector_type
+position_or_length
+output_file
+```
+
+示例：
+
+```csv
+detector_id,approach,turn,movement,phase,lane,next_edges,type
+EB_L_arrival,EB,L,EB_L,P2,upstream_EB_0,EB_left_out,E1
+EB_T_arrival,EB,T,EB_T,P1,upstream_EB_1,EB_through_out,E1
+EB_L_queue,EB,L,EB_L,P2,short_EB_0,EB_left_out,E2
+EB_T_queue,EB,T,EB_T,P1,short_EB_1,EB_through_out,E2
+EB_L_stopbar,EB,L,EB_L,P2,short_EB_0,EB_left_out,E1
+EB_T_stopbar,EB,T,EB_T,P1,short_EB_1,EB_through_out,E1
+```
+
+这个表非常重要。它会变成你们后续所有数据处理、模型训练、信号控制输入的“字典”。
+
+---
+
+## 9. 训练数据不要只随机流量，还要随机转向比例和信号方案
+
+因为你们没有真实数据，所有训练数据来自仿真，所以最大风险不是“数据不够”，而是**仿真场景不够多样**。
+
+你们至少要随机化这些变量：
+
+```text
+总流量水平：低峰 / 平峰 / 高峰 / 过饱和
+方向不均衡：东西向高、南北向低，反过来也要有
+转向比例：左转高、直行高、右转高都要覆盖
+信号配时：固定周期、不同绿信比、不同相序
+驾驶行为：跟驰参数、反应时间、期望速度、车辆组成
+事故扰动：封闭车道、降速区、车辆抛锚、行人干扰
+随机种子：每组场景多个 seed
+```
+
+数据集切分不要随机切窗口。要按场景切：
+
+```text
+train：一部分 OD / 转向比例 / 信号方案
+val：未见过的 OD / seed
+test：未见过的转向比例 + 事故场景
+```
+
+否则模型可能只是记住了某个仿真脚本的固定模式。
+
+---
+
+## 10. 最小可行版本的实施顺序
+
+你们现在可以按这个顺序推进：
+
+### 第一步：定义 movement 字典
+
+先不要写模型，先把这个表做出来：
+
+```text
+movement_id
+approach_id
+turn_type
+in_lanes
+out_edges
+phase_id
+upstream_detector_lane
+queue_detector_lane
+stopbar_detector_lane
+```
+
+这是后面所有工作的基础。
+
+---
+
+### 第二步：重构检测器，不再只测短进口 edge
+
+保留短 edge 上的 stopbar detector，但新增：
+
+```text
+上游 arrival E1
+上游/跨 edge queue E2
+必要时增加 movement-level E3
+```
+
+这里一定要把“到达流”和“放行流”分开。
+
+---
+
+### 第三步：统一 60 秒聚合周期
+
+所有 detector 都用同一个 period：
+
+```xml
+period="60"
+```
+
+后面数据对齐会简单很多。
+如果信号周期很短，比如 60–90 秒，也可以试 30 秒，但首版 60 秒更稳。
+
+---
+
+### 第四步：输出标准 CSV
+
+建议最后整理成这个格式：
+
+```csv
+scenario_id,seed,time,movement_id,approach,turn,phase,
+arrival_flow,discharge_flow,mean_speed,occupancy,
+queue_veh,queue_meter,travel_time,
+signal_state,green_remaining,incident_flag
+```
+
+这个 CSV 再转成训练张量。
+
+---
+
+### 第五步：训练统一 Transformer
+
+训练输入：
+
+```text
+过去 15 个时间步 × 12 个 movement × F 个特征
+```
+
+训练输出：
+
+```text
+未来 5/10/15 分钟 × 12 个 movement × 3 个目标
+```
+
+目标先用：
+
+```text
+arrival_flow
+queue_veh
+mean_speed
+```
+
+---
+
+### 第六步：输出给 RL 信号控制
+
+不要把 Transformer 输出直接变成信号动作。
+它只提供预测状态：
+
+```text
+predicted_phase_demand
+predicted_phase_queue
+predicted_congestion_risk
+```
+
+RL 再根据这些状态决策相位。
+
+---
+
+## 11. 对你们当前问题的最终处理建议
+
+你们现在遇到的“SUMO 进口道很短”不要通过简单拉长 edge 解决。更稳的工程方案是：
+
+```text
+短 edge 保留为停止线放行检测点；
+上游 edge 增加到达流检测点；
+用 E2 构造跨 edge 的功能性排队检测区；
+用 nextEdges 或 E3 区分左转、直行、右转；
+训练时 movement 分通道输入，同一个 Transformer 统一训练，多输出预测；
+进入信号控制时，再按 phase_id 聚合。
+```
+
+一句话概括：
+
+**检测层按 movement 精细采集，预测层统一建模，控制层按 phase 聚合。**
+
+这套结构最适合你们的数字孪生平台，因为它同时服务于交通流预测、信号控制和事故推演，而不是只为了把一个预测模型跑起来。
+
+[1]: https://sumo.dlr.de/docs/Simulation/Output/Induction_Loops_Detectors_%28E1%29.html "Induction Loops Detectors (E1) - SUMO Documentation"
+[2]: https://sumo.dlr.de/docs/Simulation/Output/Lane-_or_Edge-based_Traffic_Measures.html "Lane- or Edge-based Traffic Measures - SUMO Documentation"
+[3]: https://sumo.dlr.de/docs/Simulation/Output/Lanearea_Detectors_%28E2%29.html "Lanearea Detectors (E2) - SUMO Documentation"
+[4]: https://sumo.dlr.de/docs/Simulation/Output/Multi-Entry-Exit_Detectors_%28E3%29.html "Multi-Entry-Exit Detectors (E3) - SUMO Documentation"
