@@ -46,7 +46,7 @@
     "1704063287"
   ],
   "movement_signal_adjustment_enabled": true,
-  "movement_signal_adjustment_csv": "data/raw/batch_movement_aggregates.csv",
+  "movement_signal_adjustment_csv": "data/raw/batch_movement_aggregates_fast_v2.csv",
   "movement_signal_adjustment_config": "configs/movement_config.json",
   "junction_notes": {
     "12254671324": "自动识别后保留",

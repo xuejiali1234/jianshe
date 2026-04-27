@@ -22,6 +22,7 @@ ARTIFACT_FILES = {
     "xgboost": "xgboost_model.joblib",
     "lstm": "lstm_model.pt",
     "transformer_v1": "transformer_v1_model.pt",
+    "transformer_v2": "transformer_v2_model.pt",
 }
 
 
@@ -167,7 +168,7 @@ class ArtifactPredictor:
             if target_reducer is not None:
                 pred_scaled = target_reducer.inverse_transform(pred_scaled).astype(np.float32)
             pred_scaled = pred_scaled.reshape(1, self.horizon_steps, -1)
-        elif self.kind in {"lstm", "transformer_v1"}:
+        elif self.kind in {"lstm", "transformer_v1", "transformer_v2"}:
             import torch
 
             model = self._get_torch_model()

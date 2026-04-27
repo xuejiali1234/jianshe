@@ -87,9 +87,16 @@
       "lane_ids": [
         "-1324604421_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 153.74,
       "zone_length_m": 150.0,
@@ -197,7 +204,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 140.95,
       "zone_length_m": 150.0,
@@ -330,9 +344,14 @@
       "lane_ids": [
         "-158074689#5_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 449.44,
       "zone_length_m": 150.0,
@@ -438,9 +457,14 @@
       "lane_ids": [
         "-158176572#0_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 304.57,
       "zone_length_m": 150.0,
@@ -548,7 +572,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 92.07,
       "zone_length_m": 150.0,
@@ -671,7 +702,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 52.17,
       "zone_length_m": 150.0,
@@ -794,7 +832,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 30.69,
       "zone_length_m": 150.0,
@@ -967,7 +1012,12 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 121.77,
       "zone_length_m": 150.0,
@@ -1124,9 +1174,16 @@
       "lane_ids": [
         "-472652453#3_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 152.17,
       "zone_length_m": 150.0,
@@ -1236,7 +1293,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 52.96,
       "zone_length_m": 150.0,
@@ -1361,7 +1427,12 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 247.87,
       "zone_length_m": 150.0,
@@ -1467,9 +1538,16 @@
       "lane_ids": [
         "-E10_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 67.59,
       "zone_length_m": 150.0,
@@ -1578,9 +1656,18 @@
       "lane_ids": [
         "-E13.88_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 77.65,
       "zone_length_m": 150.0,
@@ -1711,7 +1798,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 54.41,
       "zone_length_m": 120.11,
@@ -1843,9 +1939,18 @@
       "lane_ids": [
         "-E16_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 64.12,
       "zone_length_m": 150.0,
@@ -1979,7 +2084,11 @@
       "phase_id": 0,
       "green_phase_ids": [
         0,
-        3
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 63.57,
       "zone_length_m": 150.0,
@@ -2089,7 +2198,12 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 64.73,
       "zone_length_m": 150.0,
@@ -2228,9 +2342,16 @@
       "lane_ids": [
         "-E23.227_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 48.73,
       "zone_length_m": 150.0,
@@ -2356,9 +2477,18 @@
       "lane_ids": [
         "-E26.180_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 35.41,
       "zone_length_m": 150.0,
@@ -2488,9 +2618,18 @@
       "lane_ids": [
         "-E30.210_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 41.48,
       "zone_length_m": 150.0,
@@ -2622,7 +2761,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 34.76,
       "zone_length_m": 124.89,
@@ -2755,9 +2903,18 @@
       "lane_ids": [
         "-E34.301_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 101.41,
       "zone_length_m": 150.0,
@@ -2890,7 +3047,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 58.97,
       "zone_length_m": 150.0,
@@ -3022,9 +3188,18 @@
       "lane_ids": [
         "-E38_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 39.39,
       "zone_length_m": 142.93,
@@ -3153,9 +3328,18 @@
       "lane_ids": [
         "-E7_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 35.44,
       "zone_length_m": 87.74,
@@ -3284,9 +3468,14 @@
       "lane_ids": [
         "1185749030#2_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 95.67,
       "zone_length_m": 150.0,
@@ -3435,7 +3624,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 135.56,
       "zone_length_m": 150.0,
@@ -3671,7 +3867,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 47.38,
       "zone_length_m": 150.0,
@@ -3854,7 +4057,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 43.35,
       "zone_length_m": 150.0,
@@ -4048,9 +4258,14 @@
       "lane_ids": [
         "158074689#4_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 93.13,
       "zone_length_m": 150.0,
@@ -4185,9 +4400,14 @@
       "lane_ids": [
         "158176572#1_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 134.09,
       "zone_length_m": 150.0,
@@ -4234,9 +4454,16 @@
       "lane_ids": [
         "158176573_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 114.51,
       "zone_length_m": 150.0,
@@ -4383,7 +4610,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 140.2,
       "zone_length_m": 150.0,
@@ -4518,7 +4752,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 57.75,
       "zone_length_m": 150.0,
@@ -4639,9 +4880,14 @@
       "lane_ids": [
         "158176575#3.57_0"
       ],
-      "phase_id": 3,
+      "phase_id": 0,
       "green_phase_ids": [
-        3
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 333.12,
       "zone_length_m": 150.0,
@@ -4750,7 +4996,14 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 108.52,
       "zone_length_m": 150.0,
@@ -4885,7 +5138,12 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 116.32,
       "zone_length_m": 150.0,
@@ -5018,9 +5276,16 @@
       "lane_ids": [
         "472652453#2_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 121.2,
       "zone_length_m": 150.0,
@@ -5179,7 +5444,12 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 27.38,
       "zone_length_m": 150.0,
@@ -5294,7 +5564,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 247.87,
       "zone_length_m": 150.0,
@@ -5403,9 +5682,16 @@
       "lane_ids": [
         "E11.123_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 43.28,
       "zone_length_m": 150.0,
@@ -5493,7 +5779,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 48.26,
       "zone_length_m": 150.0,
@@ -5648,9 +5943,18 @@
       "lane_ids": [
         "E2_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 26.37,
       "zone_length_m": 150.0,
@@ -5856,7 +6160,11 @@
       "phase_id": 0,
       "green_phase_ids": [
         0,
-        3
+        1,
+        2,
+        3,
+        4,
+        5
       ],
       "incoming_length_m": 50.49,
       "zone_length_m": 150.0,
@@ -5940,9 +6248,16 @@
       "lane_ids": [
         "E26.232_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 33.09,
       "zone_length_m": 150.0,
@@ -6067,9 +6382,16 @@
       "lane_ids": [
         "E28_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
       ],
       "incoming_length_m": 96.45,
       "zone_length_m": 150.0,
@@ -6172,7 +6494,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 42.65,
       "zone_length_m": 113.7,
@@ -6302,9 +6633,18 @@
       "lane_ids": [
         "E31.70_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 23.48,
       "zone_length_m": 113.27,
@@ -6436,7 +6776,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 31.21,
       "zone_length_m": 150.0,
@@ -6566,9 +6915,18 @@
       "lane_ids": [
         "E35.389_0"
       ],
-      "phase_id": 5,
+      "phase_id": 0,
       "green_phase_ids": [
-        5
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 68.06,
       "zone_length_m": 150.0,
@@ -6701,7 +7059,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 43.79,
       "zone_length_m": 150.0,
@@ -6835,7 +7202,16 @@
       ],
       "phase_id": 0,
       "green_phase_ids": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
       ],
       "incoming_length_m": 30.64,
       "zone_length_m": 150.0,

@@ -68,7 +68,9 @@ class PredictionService:
         public_config = self.config.public_dict()
         if self.movement_config:
             movement_count = int(self.movement_config.get("movement_count", len(self.movement_config.get("movements", []))))
+            movement_catalog_by_edge = self._movement_catalog_by_edge()
             public_config["movement_count"] = movement_count
+            public_config["movement_catalog_by_edge"] = movement_catalog_by_edge
             public_config["movement_summary"] = {
                 "turn_type_counts": self.movement_config.get("turn_type_counts", {}),
                 "observed_edges_without_movements": self.movement_config.get("observed_edges_without_movements", []),
@@ -85,6 +87,7 @@ class PredictionService:
             "input_feature_count": public_config["input_feature_count"],
             "per_edge_input_features": public_config["per_edge_input_features"],
             "per_movement_input_features": public_config.get("per_movement_input_features", []),
+            "movement_catalog_by_edge": public_config.get("movement_catalog_by_edge", {}),
             "active_model": self.active_model,
             "available_models": self.available_models,
             "model_metrics": self.model_metrics,
@@ -171,6 +174,9 @@ class PredictionService:
                 "demand_scale": float(row.demand_scale),
                 "base_demand_factor": float(row.base_demand_factor or self.config.base_demand_factor),
                 "signal_variant": str(getattr(row, "signal_variant", "webster_base") or "webster_base"),
+                "event_type": str(getattr(row, "event_type", "") or ""),
+                "event_policy": str(getattr(row, "event_policy", "") or ""),
+                "speed_factor": float(getattr(row, "speed_factor", 1.0) or 1.0),
             }
             for row in baseline_df.itertuples(index=False)
         ]
@@ -192,6 +198,9 @@ class PredictionService:
                     "demand_scale": float(row.demand_scale),
                     "base_demand_factor": float(row.base_demand_factor or self.config.base_demand_factor),
                     "signal_variant": str(getattr(row, "signal_variant", "webster_base") or "webster_base"),
+                    "event_type": str(getattr(row, "event_type", "") or self._event_type_from_row(row)),
+                    "event_policy": str(getattr(row, "event_policy", "") or self._event_policy_from_row(row)),
+                    "speed_factor": float(getattr(row, "speed_factor", 1.0) or 1.0),
                     "incident_type": row.incident_type,
                     "incident_start_s": int(row.incident_start_s),
                     "incident_end_s": int(row.incident_end_s),
@@ -258,6 +267,12 @@ class PredictionService:
             "incident_run_id": request.incident_run_id,
             "affected_edges": affected_edges,
             "incident_type": str(incident_meta.get("incident_type") or ""),
+            "event_type": str(incident_meta.get("event_type") or self._event_type_from_series(incident_meta)),
+            "event_policy": str(incident_meta.get("event_policy") or self._event_policy_from_series(incident_meta)),
+            "incident_start_s": int(incident_meta.get("incident_start_s") or 0),
+            "incident_end_s": int(incident_meta.get("incident_end_s") or 0),
+            "incident_speed_factor": float(incident_meta.get("speed_factor") or 0.25),
+            "incident_policy": str(incident_meta.get("event_policy") or self._event_policy_from_series(incident_meta)),
             "baseline_signal_variant": str(
                 manifest.loc[manifest["run_id"] == request.baseline_run_id]
                 .iloc[0]
@@ -413,10 +428,125 @@ class PredictionService:
         active_model_name: str | None = None,
     ) -> dict[str, Any]:
         enriched = dict(payload)
+        self._enrich_movement_payload(enriched)
         enriched["history_size"] = int(history_size)
         enriched["history_required"] = int(self.config.history_steps)
         enriched["active_model"] = active_model_name or self.active_model
         return enriched
+
+    def _movement_metadata_by_id(self) -> dict[str, dict[str, Any]]:
+        if not self.movement_config:
+            return {}
+        return {
+            str(movement.get("movement_id", "")): self._movement_metadata(movement)
+            for movement in self.movement_config.get("movements", [])
+            if movement.get("movement_id")
+        }
+
+    def _movement_catalog_by_edge(self) -> dict[str, dict[str, Any]]:
+        catalog: dict[str, dict[str, Any]] = {}
+        for meta in self._movement_metadata_by_id().values():
+            edge_id = str(meta.get("incoming_edge") or "")
+            if not edge_id:
+                continue
+            item = catalog.setdefault(
+                edge_id,
+                {
+                    "edge_id": edge_id,
+                    "movement_count": 0,
+                    "lane_ids": [],
+                    "lane_count": 0,
+                    "incoming_length_m": meta.get("incoming_length_m", 0.0),
+                    "zone_length_m": meta.get("zone_length_m", 0.0),
+                    "upstream_edges": [],
+                    "zone_quality": "ok",
+                    "movements": [],
+                },
+            )
+            item["movements"].append(meta)
+            item["movement_count"] = len(item["movements"])
+            item["incoming_length_m"] = max(
+                float(item.get("incoming_length_m") or 0.0),
+                float(meta.get("incoming_length_m") or 0.0),
+            )
+            item["zone_length_m"] = max(
+                float(item.get("zone_length_m") or 0.0),
+                float(meta.get("zone_length_m") or 0.0),
+            )
+            if str(meta.get("zone_quality") or "") == "short_upstream":
+                item["zone_quality"] = "short_upstream"
+            item["lane_ids"] = sorted(set(item["lane_ids"]) | set(meta.get("lane_ids", [])))
+            item["lane_count"] = len(item["lane_ids"])
+            item["upstream_edges"] = sorted(set(item["upstream_edges"]) | set(meta.get("upstream_edges", [])))
+
+        for item in catalog.values():
+            item["movements"] = sorted(
+                item["movements"],
+                key=lambda movement: (
+                    int(movement.get("link_index", 9999) or 9999),
+                    str(movement.get("turn_type") or ""),
+                    str(movement.get("outgoing_edge") or ""),
+                ),
+            )
+        return dict(sorted(catalog.items()))
+
+    def _movement_metadata(self, movement: dict[str, Any]) -> dict[str, Any]:
+        lane_ids = self._as_list(movement.get("lane_ids", []))
+        upstream_edges = self._as_list(movement.get("upstream_edges", []))
+        green_phase_ids = self._as_list(movement.get("green_phase_ids", []))
+        return {
+            "movement_id": str(movement.get("movement_id", "")),
+            "tls_id": str(movement.get("tls_id", "")),
+            "incoming_edge": str(movement.get("incoming_edge", "")),
+            "outgoing_edge": str(movement.get("outgoing_edge", "")),
+            "turn_type": str(movement.get("turn_type", "")),
+            "lane_ids": lane_ids,
+            "lane_count": len(lane_ids),
+            "link_index": self._safe_int(movement.get("link_index", -1), -1),
+            "link_indexes": self._as_list(movement.get("link_indexes", [])),
+            "phase_id": self._safe_int(movement.get("phase_id", -1), -1),
+            "green_phase_ids": green_phase_ids,
+            "incoming_length_m": self._safe_float(movement.get("incoming_length_m", 0.0), 0.0),
+            "zone_length_m": self._safe_float(movement.get("zone_length_m", 0.0), 0.0),
+            "arrival_start_m": self._safe_float(movement.get("arrival_start_m", 0.0), 0.0),
+            "arrival_end_m": self._safe_float(movement.get("arrival_end_m", 0.0), 0.0),
+            "queue_start_m": self._safe_float(movement.get("queue_start_m", 0.0), 0.0),
+            "queue_end_m": self._safe_float(movement.get("queue_end_m", 0.0), 0.0),
+            "zone_quality": str(movement.get("zone_quality", "")),
+            "upstream_edges": upstream_edges,
+            "zone_edges": self._as_list(movement.get("zone_edges", [])),
+            "zone_lane_m": self._safe_float(movement.get("zone_lane_m", 0.0), 0.0),
+        }
+
+    def _enrich_movement_payload(self, payload: dict[str, Any]) -> None:
+        if "movements" not in payload:
+            return
+        metadata_by_id = self._movement_metadata_by_id()
+        enriched_movements: list[dict[str, Any]] = []
+        for movement in payload.get("movements", []):
+            movement_id = str(movement.get("movement_id", ""))
+            merged = dict(metadata_by_id.get(movement_id, {}))
+            for key, value in movement.items():
+                if value not in ("", None, []):
+                    merged[key] = value
+            if "lane_ids" in merged and "lane_count" not in merged:
+                merged["lane_count"] = len(self._as_list(merged["lane_ids"]))
+            enriched_movements.append(merged)
+        payload["movements"] = enriched_movements
+
+    @staticmethod
+    def _as_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, tuple):
+            return list(value)
+        if isinstance(value, set):
+            return sorted(value)
+        if isinstance(value, str):
+            return [item for item in value.split("|") if item]
+        return [value]
 
     def _write_registry(self) -> None:
         active_artifact = self.trained_predictor.artifact_path.name if self.trained_predictor else ""
@@ -505,9 +635,28 @@ class PredictionService:
             "incident_end_s": 0,
             "affected_edges": "",
             "signal_variant": "webster_base",
+            "event_type": "",
+            "event_policy": "",
+            "speed_factor": 1.0,
         }.items():
             if column not in df.columns:
                 df[column] = default
+        if "event_type" in df.columns:
+            df["event_type"] = df.apply(
+                lambda row: self._event_type_from_series(row)
+                if pd.isna(row["event_type"]) or not str(row["event_type"]).strip()
+                else row["event_type"],
+                axis=1,
+            )
+        if "event_policy" in df.columns:
+            df["event_policy"] = df.apply(
+                lambda row: self._event_policy_from_series(row)
+                if pd.isna(row["event_policy"]) or not str(row["event_policy"]).strip()
+                else row["event_policy"],
+                axis=1,
+            )
+        if "speed_factor" in df.columns:
+            df["speed_factor"] = df.apply(self._normalized_speed_factor_from_series, axis=1)
         self._manifest_cache = df
         self._manifest_cache_mtime = mtime
         return df
@@ -551,11 +700,61 @@ class PredictionService:
             return default
 
     @staticmethod
-    def _safe_int(value: Any) -> int | None:
+    def _safe_int(value: Any, default: int | None = None) -> int | None:
         try:
-            return int(value)
+            if value is None or pd.isna(value):
+                return default
+            return int(float(value))
         except (TypeError, ValueError):
-            return None
+            return default
+
+    @staticmethod
+    def _event_type_from_row(row: Any) -> str:
+        scenario_id = str(getattr(row, "scenario_id", "") or "")
+        run_id = str(getattr(row, "run_id", "") or "")
+        if scenario_id == "S5_incident" or run_id.startswith("S5_incident"):
+            return "incident_closure"
+        if scenario_id in {"S4_vsl", "S4_incident"} or run_id.startswith(("S4_vsl", "S4_incident")):
+            return "vsl_speed_drop"
+        return ""
+
+    @staticmethod
+    def _event_type_from_series(row: Any) -> str:
+        scenario_id = str(row.get("scenario_id", "") or "")
+        run_id = str(row.get("run_id", "") or "")
+        if scenario_id == "S5_incident" or run_id.startswith("S5_incident"):
+            return "incident_closure"
+        if scenario_id in {"S4_vsl", "S4_incident"} or run_id.startswith(("S4_vsl", "S4_incident")):
+            return "vsl_speed_drop"
+        return ""
+
+    def _event_policy_from_row(self, row: Any) -> str:
+        event_type = self._event_type_from_row(row)
+        if event_type == "incident_closure":
+            return "edge_passenger_closure"
+        if event_type == "vsl_speed_drop":
+            return "variable_speed_limit"
+        return ""
+
+    def _event_policy_from_series(self, row: Any) -> str:
+        event_type = self._event_type_from_series(row)
+        if event_type == "incident_closure":
+            return "edge_passenger_closure"
+        if event_type == "vsl_speed_drop":
+            return "variable_speed_limit"
+        return ""
+
+    def _normalized_speed_factor_from_series(self, row: Any) -> float:
+        event_type = str(row.get("event_type", "") or self._event_type_from_series(row))
+        try:
+            value = float(row.get("speed_factor", 1.0))
+        except (TypeError, ValueError):
+            value = 1.0
+        if event_type == "incident_closure":
+            return 0.0
+        if event_type == "vsl_speed_drop" and value in {0.0, 1.0}:
+            return 0.25
+        return value
 
     def _load_movement_config(self) -> dict[str, Any] | None:
         path = Path(getattr(self.config, "movement_config_file", "configs/movement_config.json"))
@@ -574,6 +773,7 @@ class PredictionService:
             "incoming_edge": str(getattr(row, "incoming_edge", "")),
             "outgoing_edge": str(getattr(row, "outgoing_edge", "")),
             "turn_type": str(getattr(row, "turn_type", "")),
+            "lane_ids": self._as_list(getattr(row, "lane_ids", "")),
             "arrival_flow": self._safe_float(getattr(row, "arrival_flow", 0.0), 0.0),
             "discharge_flow": self._safe_float(getattr(row, "discharge_flow", 0.0), 0.0),
             "mean_speed": self._safe_float(getattr(row, "mean_speed_mps", 0.0), 0.0),
@@ -583,6 +783,7 @@ class PredictionService:
             "queue_veh": self._safe_float(getattr(row, "queue_veh", 0.0), 0.0),
             "queue_meter": self._safe_float(getattr(row, "queue_meter", 0.0), 0.0),
             "incident_flag": self._safe_float(getattr(row, "incident_flag", 0.0), 0.0),
+            "zone_quality": str(getattr(row, "zone_quality", "")),
             **{
                 column: self._safe_float(getattr(row, column, default), default)
                 for column, default in CONTROL_FEATURE_DEFAULTS.items()

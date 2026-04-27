@@ -154,13 +154,13 @@
   <route id="r_perimeter_low_023" edges="-E27 158074689#1 -E26 -E26.30 -E26.180 -E31 -E31.49" />
   <flow id="f_perimeter_low_023" type="passenger_car" route="r_perimeter_low_023" begin="0" end="3600" vehsPerHour="236" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_024" edges="-472652453#5.1331 -472652453#5.1437 -472652453#5.1519 -158074689#4 -158074689#3 -158074689#2 -E26 -E26.30 -E26.180 -E34 -E34.60" />
-  <flow id="f_perimeter_low_024" type="passenger_car" route="r_perimeter_low_024" begin="0" end="3600" vehsPerHour="240" departSpeed="max" departLane="best" />
+  <flow id="f_perimeter_low_024" type="passenger_car" route="r_perimeter_low_024" begin="0" end="3600" vehsPerHour="72" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_025" edges="-472652453#5.1331 -472652453#5.1437 -E35 -E35.87" />
-  <flow id="f_perimeter_low_025" type="passenger_car" route="r_perimeter_low_025" begin="0" end="3600" vehsPerHour="380" departSpeed="max" departLane="best" />
+  <flow id="f_perimeter_low_025" type="passenger_car" route="r_perimeter_low_025" begin="0" end="3600" vehsPerHour="114" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_026" edges="-472652453#5.1331 -472652453#5.1437 -E35 -E35.87" />
-  <flow id="f_perimeter_low_026" type="passenger_car" route="r_perimeter_low_026" begin="0" end="3600" vehsPerHour="272" departSpeed="max" departLane="best" />
+  <flow id="f_perimeter_low_026" type="passenger_car" route="r_perimeter_low_026" begin="0" end="3600" vehsPerHour="82" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_027" edges="-472652453#5.1331 -472652453#5.1437 -E35 -E35.87" />
-  <flow id="f_perimeter_low_027" type="passenger_car" route="r_perimeter_low_027" begin="0" end="3600" vehsPerHour="235" departSpeed="max" departLane="best" />
+  <flow id="f_perimeter_low_027" type="passenger_car" route="r_perimeter_low_027" begin="0" end="3600" vehsPerHour="71" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_028" edges="E29 472645993#4 -1324604419#1 -1324604421 158176575#1 158176575#2 158176575#2.141 -472652453#2 -472652453#1 -472652453#1.89 E10 E9 -E6 E5 -E2 -E1 -E21 -E21.32" />
   <flow id="f_perimeter_low_028" type="passenger_car" route="r_perimeter_low_028" begin="0" end="3600" vehsPerHour="211" departSpeed="max" departLane="best" />
   <route id="r_perimeter_low_029" edges="E29 472645993#4 -E28 -E30 -E30.41 -E30.210 E38 E39" />
@@ -234,9 +234,9 @@
   <route id="r_internal_low_009" edges="-E27 158074689#1 158074689#2 -158074689#2" />
   <flow id="f_internal_low_009" type="passenger_car" route="r_internal_low_009" begin="0" end="3600" vehsPerHour="217" departSpeed="max" departLane="best" />
   <route id="r_internal_low_010" edges="-472652453#5.1331 -472652453#5.1437 -472652453#5.1519 -472652453#4 -472652453#4.38 1324604419#0 -1324604421" />
-  <flow id="f_internal_low_010" type="passenger_car" route="r_internal_low_010" begin="0" end="3600" vehsPerHour="235" departSpeed="max" departLane="best" />
+  <flow id="f_internal_low_010" type="passenger_car" route="r_internal_low_010" begin="0" end="3600" vehsPerHour="71" departSpeed="max" departLane="best" />
   <route id="r_internal_low_011" edges="-472652453#5.1331 -472652453#5.1437 -472652453#5.1519 -472652453#4 -472652453#4.38 1324604419#0 -1324604419#0" />
-  <flow id="f_internal_low_011" type="passenger_car" route="r_internal_low_011" begin="0" end="3600" vehsPerHour="248" departSpeed="max" departLane="best" />
+  <flow id="f_internal_low_011" type="passenger_car" route="r_internal_low_011" begin="0" end="3600" vehsPerHour="74" departSpeed="max" departLane="best" />
   <route id="r_internal_low_012" edges="E29 472645993#4 -E28 -E30" />
   <flow id="f_internal_low_012" type="passenger_car" route="r_internal_low_012" begin="0" end="3600" vehsPerHour="240" departSpeed="max" departLane="best" />
   <route id="r_internal_low_013" edges="E29 472645993#4 -1324682272#2.123 -1324682272#2.123.55 E22 E22.87" />

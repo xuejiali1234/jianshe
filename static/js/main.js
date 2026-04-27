@@ -7,6 +7,7 @@ const vClassColors = {
     pedestrian: '#ffeb3b',
     DEFAULT: '#ffffff'
 };
+const VEHICLE_ICON_URL = '/static/assets/vehicle_top_blue_marker.png';
 
 const I18N = {
     titleDefault: '城市交通数字孪生看板',
@@ -37,8 +38,54 @@ const modelNameMap = {
     ha_baseline: '历史平均基线',
     xgboost: 'XGBoost',
     lstm: 'LSTM',
-    transformer_v1: 'Transformer V1'
+    transformer_v1: 'Transformer V1',
+    transformer_v2: 'Transformer V2'
 };
+
+function getVehicleZoomScale() {
+    if (!map || typeof map.getZoom !== 'function') return 1;
+    const zoom = Number(map.getZoom());
+    if (!Number.isFinite(zoom)) return 1;
+    return Math.max(0.55, Math.min(1.25, 1 + (zoom - 16) * 0.12));
+}
+
+function getVehicleIconSize(vClass) {
+    const scale = getVehicleZoomScale();
+    let base = { width: 10, height: 18 };
+    if (vClass === 'bus' || vClass === 'truck') base = { width: 12, height: 22 };
+    if (vClass === 'emergency') base = { width: 11, height: 20 };
+    if (vClass === 'motorcycle') base = { width: 7, height: 13 };
+    if (vClass === 'pedestrian') base = { width: 8, height: 8 };
+    return {
+        width: Math.max(5, Math.round(base.width * scale)),
+        height: Math.max(8, Math.round(base.height * scale))
+    };
+}
+
+function normalizeVehicleAngle(angle) {
+    const value = Number(angle);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function renderVehicleMarkerContent(vehicle) {
+    const color = vClassColors[vehicle.vClass] || vClassColors.DEFAULT;
+    const size = getVehicleIconSize(vehicle.vClass);
+    const angle = normalizeVehicleAngle(vehicle.angle);
+    if (vehicle.vClass === 'pedestrian') {
+        return `
+            <div class="vehicle-icon vehicle-pedestrian" style="width:${size.width}px;height:${size.height}px;--vehicle-color:${color};">
+                <svg viewBox="0 0 8 8" width="8" height="8" aria-hidden="true">
+                    <circle cx="4" cy="4" r="3" fill="${color}" stroke="#06111f" stroke-width="1" />
+                </svg>
+            </div>
+        `;
+    }
+    return `
+        <div class="vehicle-icon vehicle-car-icon" style="width:${size.width}px;height:${size.height}px;transform:translate(-50%, -50%) rotate(${angle}deg);transform-origin:50% 50%;pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));--vehicle-color:${color};">
+            <img src="${VEHICLE_ICON_URL}" alt="" draggable="false" style="display:block;width:${size.width}px;height:${size.height}px;object-fit:contain;user-select:none;pointer-events:none;" />
+        </div>
+    `;
+}
 
 function formatModelName(modelName) {
     return modelNameMap[modelName] || modelName || '--';
@@ -54,6 +101,45 @@ function formatSignedValue(value, digits = 2, suffix = '') {
     if (!Number.isFinite(number)) return '--';
     const prefix = number > 0 ? '+' : '';
     return `${prefix}${number.toFixed(digits)}${suffix}`;
+}
+
+function formatMeters(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return '--';
+    return `${number.toFixed(number >= 100 ? 0 : 1)}m`;
+}
+
+function getTurnLabel(turnType) {
+    return TURN_LABELS[String(turnType || '').toLowerCase()] || String(turnType || '--');
+}
+
+function getZoneQualityLabel(zoneQuality) {
+    return zoneQuality === 'short_upstream' ? '上游不足' : '正常';
+}
+
+function formatEventType(eventType, incidentType = '') {
+    if (eventType === 'vsl_speed_drop') return `S4 可变限速：${incidentType || 'speed_drop'}`;
+    if (eventType === 'incident_closure') return `S5 事故封停：${incidentType || 'closure'}`;
+    return incidentType || '--';
+}
+
+function getMovementCatalog(edgeId) {
+    return predictionConfigState.movementCatalogByEdge?.[edgeId] || null;
+}
+
+function formatLaneIds(laneIds) {
+    if (!Array.isArray(laneIds) || !laneIds.length) return '--';
+    return laneIds.join(', ');
+}
+
+function getPredictionEdgeLabel(edgeId) {
+    const catalog = getMovementCatalog(edgeId);
+    if (!catalog) return edgeId;
+    const laneCount = Number(catalog.lane_count || 0);
+    const movementCount = Number(catalog.movement_count || 0);
+    const laneLabel = laneCount > 0 ? `${laneCount}车道` : '车道未知';
+    const movementLabel = movementCount > 0 ? `${movementCount}个转向检测` : '无转向检测';
+    return `${edgeId}（${laneLabel} / ${movementLabel}）`;
 }
 
 function escapeHtml(text) {
@@ -248,6 +334,9 @@ const modeCompareBtn = document.getElementById('predictionModeCompare');
 const realtimeViewEl = document.getElementById('realtimePredictionView');
 const compareViewEl = document.getElementById('scenarioCompareView');
 const compareControlsEl = document.getElementById('scenarioCompareControls');
+const movementSegmentSwitchEl = document.getElementById('movementSegmentSwitch');
+const movementSwitchHintEl = document.getElementById('movementSwitchHint');
+const TURN_LABELS = { l: '左转', s: '直行', r: '右转' };
 
 let timeData = [];
 let speedData = [];
@@ -255,13 +344,16 @@ let pastPredData = [];
 let lastRealtimePredictionData = null;
 let lastComparePayload = null;
 let selectedPredictionEdgeId = null;
+let selectedMovementSegmentId = 'aggregate';
 let currentMonitorEdgeId = 'ALL';
 let predictionPanelMode = 'realtime';
 let compareAffectedEdgeIds = [];
 let predictionConfigState = {
     activeModel: 'ha_baseline',
     availableModels: [],
-    scenarioCompareAvailable: false
+    scenarioCompareAvailable: false,
+    observedEdges: [],
+    movementCatalogByEdge: {}
 };
 let scenarioRunState = {
     baselineRuns: [],
@@ -275,6 +367,7 @@ let roadPolylines = [];
 let vehicleMarkers = [];
 let tlMarkers = [];
 let incidentMarkers = {};
+let compareIncidentEdgeMarkers = {};
 let lastRadarData = [];
 let lastTlData = [];
 let lastIncidentsData = [];
@@ -323,13 +416,15 @@ function getMonitorRoadStyle() {
 
 function getIncidentRoadStyle() {
     return {
-        strokeWeight: 6,
-        strokeColor: '#ff6b81',
-        strokeOpacity: 0.9,
+        strokeWeight: 8,
+        strokeColor: '#ff3030',
+        strokeOpacity: 0.96,
+        strokeStyle: 'dashed',
+        strokeDasharray: [12, 8],
         isOutline: true,
-        outlineColor: '#ffd5d6',
-        borderWeight: 3,
-        zIndex: 88
+        outlineColor: '#ffeb3b',
+        borderWeight: 5,
+        zIndex: 96
     };
 }
 
@@ -534,22 +629,88 @@ function refreshRoadHighlights() {
         polyline.setOptions(getBaseRoadStyle());
     });
 
-    if (predictionPanelMode === 'compare') {
-        compareAffectedEdgeIds.forEach(edgeId => {
-            const polyline = roadPolylines.find(item => item.getExtData()?.edgeId === edgeId);
-            if (polyline) polyline.setOptions(getIncidentRoadStyle());
-        });
-    }
-
     if (currentMonitorEdgeId && currentMonitorEdgeId !== 'ALL') {
-        const monitorPolyline = roadPolylines.find(item => item.getExtData()?.edgeId === currentMonitorEdgeId);
-        if (monitorPolyline) monitorPolyline.setOptions(getMonitorRoadStyle());
+        setEdgePolylinesStyle(currentMonitorEdgeId, getMonitorRoadStyle());
     }
 
     if (selectedPredictionEdgeId && selectedPredictionEdgeId !== 'ALL') {
-        const targetPolyline = roadPolylines.find(item => item.getExtData()?.edgeId === selectedPredictionEdgeId);
-        if (targetPolyline) targetPolyline.setOptions(getPredictionRoadStyle());
+        setEdgePolylinesStyle(selectedPredictionEdgeId, getPredictionRoadStyle());
     }
+
+    if (predictionPanelMode === 'compare') {
+        compareAffectedEdgeIds.forEach(edgeId => {
+            setEdgePolylinesStyle(edgeId, getIncidentRoadStyle());
+        });
+    }
+
+    renderCompareIncidentEdgeMarkers();
+}
+
+function setEdgePolylinesStyle(edgeId, style) {
+    roadPolylines
+        .filter(item => item.getExtData()?.edgeId === edgeId)
+        .forEach(polyline => polyline.setOptions(style));
+}
+
+function getEdgePolylineCenter(edgeId) {
+    const polyline = roadPolylines.find(item => item.getExtData()?.edgeId === edgeId);
+    if (!polyline || typeof polyline.getPath !== 'function') return null;
+    const path = polyline.getPath();
+    if (!Array.isArray(path) || !path.length) return null;
+    const point = path[Math.floor(path.length / 2)];
+    if (Array.isArray(point)) return point;
+    if (point && typeof point.getLng === 'function' && typeof point.getLat === 'function') {
+        return [point.getLng(), point.getLat()];
+    }
+    if (point && Number.isFinite(Number(point.lng)) && Number.isFinite(Number(point.lat))) {
+        return [Number(point.lng), Number(point.lat)];
+    }
+    return null;
+}
+
+function clearCompareIncidentEdgeMarkers() {
+    if (!map) return;
+    Object.values(compareIncidentEdgeMarkers).forEach(marker => map.remove(marker));
+    compareIncidentEdgeMarkers = {};
+}
+
+function renderCompareIncidentEdgeMarkers() {
+    if (!map) return;
+    if (predictionPanelMode !== 'compare' || !compareAffectedEdgeIds.length) {
+        clearCompareIncidentEdgeMarkers();
+        return;
+    }
+    const activeEdges = new Set(compareAffectedEdgeIds);
+    Object.keys(compareIncidentEdgeMarkers).forEach(edgeId => {
+        if (!activeEdges.has(edgeId)) {
+            map.remove(compareIncidentEdgeMarkers[edgeId]);
+            delete compareIncidentEdgeMarkers[edgeId];
+        }
+    });
+    const eventType = lastComparePayload?.event_type || '';
+    const speedFactor = Number(lastComparePayload?.incident_speed_factor || 0.25);
+    const factorLabel = Number.isFinite(speedFactor) ? Math.round(speedFactor * 100) : 25;
+    compareAffectedEdgeIds.forEach(edgeId => {
+        const center = getEdgePolylineCenter(edgeId);
+        if (!center) return;
+        const markerText = eventType === 'incident_closure'
+            ? '事故：封停'
+            : `限速：${factorLabel}%`;
+        const content = `<div class="compare-incident-marker">${markerText}</div>`;
+        if (!compareIncidentEdgeMarkers[edgeId]) {
+            const marker = new AMap.Marker({
+                position: center,
+                content,
+                offset: new AMap.Pixel(-44, -28),
+                zIndex: 107
+            });
+            map.add(marker);
+            compareIncidentEdgeMarkers[edgeId] = marker;
+        } else {
+            compareIncidentEdgeMarkers[edgeId].setPosition(center);
+            compareIncidentEdgeMarkers[edgeId].setContent(content);
+        }
+    });
 }
 
 function setPredictionPanelMode(mode) {
@@ -571,6 +732,7 @@ function setPredictionPanelMode(mode) {
 
 function updatePredictionEdgeOptions(edgeIds) {
     if (!predictionEdgeSelectEl) return;
+    const previousEdgeId = selectedPredictionEdgeId;
     const currentEdgeIds = Array.from(predictionEdgeSelectEl.options).map(option => option.value);
     if (currentEdgeIds.join('|') !== edgeIds.join('|')) {
         predictionEdgeSelectEl.innerHTML = '';
@@ -581,10 +743,49 @@ function updatePredictionEdgeOptions(edgeIds) {
             predictionEdgeSelectEl.appendChild(option);
         });
     }
+    Array.from(predictionEdgeSelectEl.options).forEach(option => {
+        option.textContent = getPredictionEdgeLabel(option.value);
+    });
     if (!selectedPredictionEdgeId || !edgeIds.includes(selectedPredictionEdgeId)) {
         selectedPredictionEdgeId = edgeIds[0] || null;
     }
+    if (selectedPredictionEdgeId !== previousEdgeId) {
+        selectedMovementSegmentId = 'aggregate';
+    }
     predictionEdgeSelectEl.value = selectedPredictionEdgeId || '';
+}
+
+function getIncidentRunAffectedEdges(run) {
+    if (!run) return [];
+    if (Array.isArray(run.affected_edges)) return run.affected_edges.filter(Boolean);
+    return String(run.affected_edges || '').split('|').filter(Boolean);
+}
+
+function isPredictionEdgeSelectable(edgeId) {
+    if (!edgeId) return false;
+    if (predictionConfigState.observedEdges.includes(edgeId)) return true;
+    return Array.from(predictionEdgeSelectEl?.options || []).some(option => option.value === edgeId);
+}
+
+function getFirstSelectableAffectedEdge(run) {
+    const affectedEdges = getIncidentRunAffectedEdges(run);
+    if (!affectedEdges.length) return '';
+    const selectableEdges = new Set([
+        ...predictionConfigState.observedEdges,
+        ...Array.from(predictionEdgeSelectEl?.options || []).map(option => option.value)
+    ]);
+    return affectedEdges.find(edgeId => selectableEdges.has(edgeId)) || affectedEdges[0];
+}
+
+function selectPredictionEdgeForCompare(edgeId) {
+    if (!edgeId) return;
+    selectedPredictionEdgeId = edgeId;
+    selectedMovementSegmentId = 'aggregate';
+    if (predictionEdgeSelectEl) {
+        const hasOption = Array.from(predictionEdgeSelectEl.options).some(option => option.value === edgeId);
+        if (hasOption) predictionEdgeSelectEl.value = edgeId;
+    }
+    refreshRoadHighlights();
 }
 
 function applyPredictionConfig(payload) {
@@ -592,9 +793,21 @@ function applyPredictionConfig(payload) {
     predictionConfigState.activeModel = payload.active_model || 'ha_baseline';
     predictionConfigState.availableModels = Array.isArray(payload.available_models) ? payload.available_models : [];
     predictionConfigState.scenarioCompareAvailable = Boolean(payload.scenario_compare_available);
+    predictionConfigState.movementCatalogByEdge = payload.config?.movement_catalog_by_edge || payload.movement_catalog_by_edge || {};
     const configEdges = Array.isArray(payload.config?.observed_edges) ? payload.config.observed_edges : [];
+    predictionConfigState.observedEdges = configEdges;
     if (configEdges.length) {
         updatePredictionEdgeOptions(configEdges);
+        if (predictionPanelMode === 'compare') {
+            const incidentRun = scenarioRunState.incidentRuns.find(run => run.run_id === scenarioRunState.selectedIncidentRunId);
+            const defaultAffectedEdge = getFirstSelectableAffectedEdge(incidentRun);
+            if (defaultAffectedEdge && (
+                !isPredictionEdgeSelectable(selectedPredictionEdgeId)
+                || !getIncidentRunAffectedEdges(incidentRun).includes(selectedPredictionEdgeId)
+            )) {
+                selectPredictionEdgeForCompare(defaultAffectedEdge);
+            }
+        }
     }
 
     if (predictionModelSelectEl) {
@@ -663,7 +876,7 @@ function populateScenarioRunSelectors(payload) {
         scenarioRunState.incidentRuns.forEach(run => {
             const option = document.createElement('option');
             option.value = run.run_id;
-            option.textContent = `${run.run_id} (${run.incident_type})`;
+            option.textContent = `${run.run_id} (${formatEventType(run.event_type, run.incident_type)})`;
             incidentRunSelectEl.appendChild(option);
         });
     }
@@ -671,6 +884,13 @@ function populateScenarioRunSelectors(payload) {
     const incidentRun = scenarioRunState.incidentRuns.find(run => run.run_id === scenarioRunState.selectedIncidentRunId)
         || scenarioRunState.incidentRuns[0];
     scenarioRunState.selectedIncidentRunId = incidentRun ? incidentRun.run_id : '';
+    const defaultAffectedEdge = getFirstSelectableAffectedEdge(incidentRun);
+    if (defaultAffectedEdge && (
+        !isPredictionEdgeSelectable(selectedPredictionEdgeId)
+        || !getIncidentRunAffectedEdges(incidentRun).includes(selectedPredictionEdgeId)
+    )) {
+        selectPredictionEdgeForCompare(defaultAffectedEdge);
+    }
     const requestedBaselineRunId = incidentRun?.recommended_baseline_run_id
         || scenarioRunState.selectedBaselineRunId
         || scenarioRunState.baselineRuns[0]?.run_id
@@ -743,17 +963,128 @@ async function requestScenarioCompare() {
     }
 }
 
+function getMovementsForSelectedEdge(prediction, edgeId) {
+    const catalog = getMovementCatalog(edgeId);
+    const catalogMovements = Array.isArray(catalog?.movements) ? catalog.movements : [];
+    const byId = new Map();
+    (prediction?.movements || []).forEach(movement => {
+        if (movement.incoming_edge === edgeId || catalogMovements.some(item => item.movement_id === movement.movement_id)) {
+            byId.set(movement.movement_id, movement);
+        }
+    });
+    if (!catalogMovements.length) {
+        return Array.from(byId.values());
+    }
+    return catalogMovements.map(meta => ({ ...meta, ...(byId.get(meta.movement_id) || {}) }));
+}
+
+function getMovementSeries(movement) {
+    const flowSeries = movement?.pred_arrival_flow || movement?.pred_flow || [];
+    const speedSeries = movement?.pred_mean_speed || movement?.pred_speed || [];
+    const queueSeries = movement?.pred_queue_veh || movement?.pred_queue || [];
+    return {
+        flow: flowSeries.map(value => Number(value)),
+        speed: speedSeries.map(value => Number(value) * 3.6),
+        queue: queueSeries.map(value => Number(value))
+    };
+}
+
+function getNodeSeries(node) {
+    return {
+        flow: (node?.pred_flow || []).map(value => Number(value)),
+        speed: (node?.pred_speed || []).map(value => Number(value) * 3.6),
+        queue: (node?.pred_queue || []).map(value => Number(value))
+    };
+}
+
+function getMovementSegmentLabel(movement) {
+    return `${getTurnLabel(movement.turn_type)}→${movement.outgoing_edge || '--'}`;
+}
+
+function getMovementSegmentTitle(movement) {
+    const laneText = formatLaneIds(movement.lane_ids);
+    const zoneText = formatMeters(movement.zone_length_m);
+    const qualityText = getZoneQualityLabel(movement.zone_quality || 'ok');
+    return `车道组：${laneText}；检测区：${zoneText}；状态：${qualityText}`;
+}
+
+function getMovementSwitchHint(edgeId, movements) {
+    if (selectedMovementSegmentId === 'aggregate') {
+        const catalog = getMovementCatalog(edgeId);
+        if (!catalog) return '进口道聚合';
+        const movementCount = Number(catalog.movement_count || movements.length || 0);
+        return `聚合 / ${movementCount}个转向 / 检测区${formatMeters(catalog.zone_length_m)}`;
+    }
+    const movement = movements.find(item => item.movement_id === selectedMovementSegmentId);
+    if (!movement) return '进口道聚合';
+    return `${getMovementSegmentLabel(movement)} / ${formatLaneIds(movement.lane_ids)} / ${formatMeters(movement.zone_length_m)}`;
+}
+
+function renderMovementSegmentSwitch(edgeId, prediction) {
+    if (!movementSegmentSwitchEl) return;
+    const movements = getMovementsForSelectedEdge(prediction, edgeId);
+    const hasSelectedMovement = movements.some(item => item.movement_id === selectedMovementSegmentId);
+    if (selectedMovementSegmentId !== 'aggregate' && !hasSelectedMovement) {
+        selectedMovementSegmentId = 'aggregate';
+    }
+    movementSegmentSwitchEl.innerHTML = '';
+    const options = [
+        {
+            id: 'aggregate',
+            label: '聚合',
+            title: '当前进口道聚合预测'
+        },
+        ...movements.map(movement => ({
+            id: movement.movement_id,
+            label: getMovementSegmentLabel(movement),
+            title: getMovementSegmentTitle(movement)
+        }))
+    ];
+    options.forEach(option => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `movement-segment-btn${option.id === selectedMovementSegmentId ? ' active' : ''}`;
+        button.textContent = option.label;
+        button.title = option.title;
+        button.onclick = () => {
+            selectedMovementSegmentId = option.id;
+            if (lastRealtimePredictionData) {
+                updateRealtimePredictionPanel(lastRealtimePredictionData);
+            }
+        };
+        movementSegmentSwitchEl.appendChild(button);
+    });
+    if (movementSwitchHintEl) {
+        movementSwitchHintEl.textContent = getMovementSwitchHint(edgeId, movements);
+        movementSwitchHintEl.title = movementSwitchHintEl.textContent;
+    }
+}
+
+function getSelectedPredictionSeries(prediction, node, edgeId) {
+    if (selectedMovementSegmentId === 'aggregate') {
+        return getNodeSeries(node);
+    }
+    const movement = getMovementsForSelectedEdge(prediction, edgeId)
+        .find(item => item.movement_id === selectedMovementSegmentId);
+    return movement ? getMovementSeries(movement) : getNodeSeries(node);
+}
+
 function updateRealtimePredictionPanel(prediction) {
     if (!prediction || !prediction.nodes || !prediction.nodes.length) return;
     lastRealtimePredictionData = prediction;
     updatePredictionEdgeOptions(prediction.nodes.map(node => node.edge_id));
 
     const node = prediction.nodes.find(item => item.edge_id === selectedPredictionEdgeId) || prediction.nodes[0];
+    if (node && selectedPredictionEdgeId !== node.edge_id) {
+        selectedPredictionEdgeId = node.edge_id;
+    }
+    renderMovementSegmentSwitch(selectedPredictionEdgeId, prediction);
     const horizon = prediction.horizon || [];
     const labels = horizon.map(step => `+${step}m`);
-    const flow = (node.pred_flow || []).map(value => Number(value));
-    const speed = (node.pred_speed || []).map(value => Number(value) * 3.6);
-    const queue = (node.pred_queue || []).map(value => Number(value));
+    const selectedSeries = getSelectedPredictionSeries(prediction, node, selectedPredictionEdgeId);
+    const flow = selectedSeries.flow;
+    const speed = selectedSeries.speed;
+    const queue = selectedSeries.queue;
     const historySize = Number(prediction.history_size || 0);
     const historyRequired = Number(prediction.history_required || 12);
     const activeModelName = prediction.active_model || predictionConfigState.activeModel;
@@ -807,11 +1138,35 @@ function updateScenarioComparePanel(payload) {
     const speedIncident = (incidentNode.pred_speed || []).map(value => Number(value) * 3.6);
     const queueNormal = (baselineNode.pred_queue || []).map(Number);
     const queueIncident = (incidentNode.pred_queue || []).map(Number);
+    const selectedIsDirectAffected = compareAffectedEdgeIds.includes(selectedPredictionEdgeId);
+    const incidentStart = Number(payload.incident_start_s ?? payload.anchor_step ?? 0);
+    const incidentEnd = Number(payload.incident_end_s ?? 0);
+    const incidentSpeedFactor = Number(payload.incident_speed_factor || 0.25);
+    const eventType = payload.event_type || '';
+    const speedFactorLabel = Number.isFinite(incidentSpeedFactor) ? Math.round(incidentSpeedFactor * 100) : 25;
+    const noticeEl = document.getElementById('compareIncidentNotice');
+    const eventLabel = formatEventType(eventType, payload.incident_type);
+    const eventActionText = eventType === 'incident_closure'
+        ? `禁止 passenger 车辆进入影响路段`
+        : `最大速度降至基础速度的 ${speedFactorLabel}%`;
 
     document.getElementById('compareModelLabel').innerText = formatModelName(payload.model_name || predictionConfigState.activeModel);
-    document.getElementById('compareIncidentType').innerText = payload.incident_type || '--';
-    document.getElementById('compareAnchorStep').innerText = `${payload.anchor_step || 0}s`;
-    document.getElementById('compareAffectedEdges').innerText = compareAffectedEdgeIds.length ? compareAffectedEdgeIds.join(', ') : '--';
+    document.getElementById('compareIncidentType').innerText = eventLabel !== '--'
+        ? `${eventLabel} / ${eventType === 'incident_closure' ? '封停' : `限速${speedFactorLabel}%`}`
+        : '--';
+    document.getElementById('compareAnchorStep').innerText = incidentEnd > incidentStart
+        ? `${incidentStart}s - ${incidentEnd}s`
+        : `${payload.anchor_step || 0}s`;
+    document.getElementById('compareAffectedEdges').innerText = compareAffectedEdgeIds.length
+        ? `${compareAffectedEdgeIds.join(', ')}（红色虚线）`
+        : '--';
+    if (noticeEl) {
+        noticeEl.classList.toggle('indirect', !selectedIsDirectAffected);
+        const affectedText = compareAffectedEdgeIds.length ? compareAffectedEdgeIds.join(', ') : '--';
+        noticeEl.innerText = selectedIsDirectAffected
+            ? `当前查看的是事件直接影响路段 ${selectedPredictionEdgeId}。${eventLabel}：${incidentStart}s-${incidentEnd}s 内，${affectedText} ${eventActionText}。`
+            : `当前查看的 ${selectedPredictionEdgeId} 不是事件直接影响路段，曲线主要表示外溢影响。直接影响路段为 ${affectedText}，事件窗口 ${incidentStart}s-${incidentEnd}s，处理方式：${eventActionText}。`;
+    }
     document.getElementById('compareFlowDelta').innerText = formatSignedValue((delta.delta_flow || [])[0], 2);
     document.getElementById('compareSpeedDelta').innerText = formatSignedValue(((delta.delta_speed || [])[0] || 0) * 3.6, 2, ' km/h');
     document.getElementById('compareQueueDelta').innerText = formatSignedValue((delta.delta_queue || [])[0], 2);
@@ -845,12 +1200,10 @@ function updateScenarioComparePanel(payload) {
 function updateMapVectors() {
     if (!map) return;
     while (vehicleMarkers.length < lastRadarData.length) {
-        const marker = new AMap.CircleMarker({
-            center: [0, 0],
-            radius: 3,
-            fillColor: '#ffeb3b',
-            strokeOpacity: 0,
-            fillOpacity: 1,
+        const marker = new AMap.Marker({
+            position: [0, 0],
+            content: renderVehicleMarkerContent({ vClass: 'passenger', angle: 0 }),
+            offset: new AMap.Pixel(0, 0),
             zIndex: 110
         });
         map.add(marker);
@@ -862,12 +1215,8 @@ function updateMapVectors() {
     }
     for (let i = 0; i < lastRadarData.length; i += 1) {
         const vehicle = lastRadarData[i];
-        const color = vClassColors[vehicle.vClass] || vClassColors.DEFAULT;
-        const radius = (vehicle.vClass === 'bus' || vehicle.vClass === 'truck' || vehicle.vClass === 'emergency')
-            ? 4.5
-            : (vehicle.vClass === 'motorcycle' ? 2 : 3.5);
-        vehicleMarkers[i].setCenter([vehicle.x, vehicle.y]);
-        vehicleMarkers[i].setOptions({ fillColor: color, radius });
+        vehicleMarkers[i].setPosition([vehicle.x, vehicle.y]);
+        vehicleMarkers[i].setContent(renderVehicleMarkerContent(vehicle));
     }
 
     while (tlMarkers.length < lastTlData.length) {
@@ -1170,8 +1519,9 @@ if (predictionModelSelectEl) {
 if (predictionEdgeSelectEl) {
     predictionEdgeSelectEl.onchange = () => {
         selectedPredictionEdgeId = predictionEdgeSelectEl.value;
+        selectedMovementSegmentId = 'aggregate';
         if (predictionPanelMode === 'compare') {
-            updateScenarioComparePanel(lastComparePayload);
+            requestScenarioCompare();
         } else {
             updateRealtimePredictionPanel(lastRealtimePredictionData);
         }
@@ -1189,6 +1539,7 @@ if (incidentRunSelectEl) {
     incidentRunSelectEl.onchange = () => {
         scenarioRunState.selectedIncidentRunId = incidentRunSelectEl.value;
         const selectedIncident = scenarioRunState.incidentRuns.find(run => run.run_id === incidentRunSelectEl.value);
+        selectPredictionEdgeForCompare(getFirstSelectableAffectedEdge(selectedIncident));
         if (selectedIncident?.recommended_baseline_run_id) {
             scenarioRunState.selectedBaselineRunId = selectedIncident.recommended_baseline_run_id;
             if (baselineRunSelectEl) baselineRunSelectEl.value = scenarioRunState.selectedBaselineRunId;
@@ -1204,6 +1555,7 @@ renderHeaderStatus(I18N.titleDefault);
 connectWS();
 if (map) {
     map.on('complete', () => loadNetworkToMap());
+    map.on('zoomend', () => updateMapVectors());
 } else {
     fetchPredictionConfig();
     fetchScenarioRuns();

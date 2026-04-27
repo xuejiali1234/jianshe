@@ -291,6 +291,75 @@
             height: 68px;
         }
 
+        .movement-switch-section {
+            margin: 8px 0 10px;
+            padding: 7px 8px;
+            background: rgba(7, 12, 22, 0.52);
+            border: 1px solid rgba(13, 223, 255, 0.24);
+            border-radius: 4px;
+        }
+
+        .movement-switch-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 6px;
+            color: #8cc8ff;
+            font-size: 10px;
+            letter-spacing: 1px;
+        }
+
+        .movement-switch-hint {
+            min-width: 0;
+            color: #dffcff;
+            font-family: 'Courier New', Consolas, monospace;
+            font-size: 10px;
+            letter-spacing: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .movement-segment-switch {
+            display: flex;
+            gap: 5px;
+            overflow-x: auto;
+            padding-bottom: 2px;
+        }
+
+        .movement-segment-switch::-webkit-scrollbar {
+            height: 4px;
+        }
+
+        .movement-segment-switch::-webkit-scrollbar-thumb {
+            background: rgba(13, 223, 255, 0.35);
+            border-radius: 999px;
+        }
+
+        .movement-segment-btn {
+            flex: 0 0 auto;
+            max-width: 118px;
+            padding: 5px 8px;
+            border: 1px solid rgba(31, 130, 192, 0.5);
+            border-radius: 999px;
+            background: rgba(3, 8, 16, 0.72);
+            color: #cfe8ff;
+            font-size: 10px;
+            line-height: 1.15;
+            cursor: pointer;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .movement-segment-btn.active {
+            border-color: rgba(13, 223, 255, 0.9);
+            background: rgba(13, 223, 255, 0.16);
+            color: #fff;
+            box-shadow: 0 0 8px rgba(13, 223, 255, 0.22);
+        }
+
         .compare-delta-grid {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -318,6 +387,38 @@
             color: #fff;
             font-size: 12px;
             font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .compare-incident-notice {
+            margin: 0 0 10px;
+            padding: 7px 9px;
+            border: 1px solid rgba(255, 77, 79, 0.45);
+            border-left: 3px solid #ff4d4f;
+            border-radius: 4px;
+            background: rgba(255, 77, 79, 0.1);
+            color: #ffd5d6;
+            font-size: 11px;
+            line-height: 1.45;
+        }
+
+        .compare-incident-notice.indirect {
+            border-color: rgba(255, 216, 77, 0.45);
+            border-left-color: #ffd84d;
+            background: rgba(255, 216, 77, 0.1);
+            color: #fff1b8;
+        }
+
+        .compare-incident-marker {
+            padding: 4px 7px;
+            border: 1px solid rgba(255, 77, 79, 0.95);
+            border-radius: 999px;
+            background: rgba(70, 5, 10, 0.92);
+            box-shadow: 0 0 12px rgba(255, 77, 79, 0.65);
+            color: #fff;
+            font-size: 11px;
+            line-height: 1;
+            white-space: nowrap;
+            pointer-events: none;
         }
 
         .signal-mini-marker {
@@ -578,7 +679,7 @@
                             <select id="baselineRunSelect" class="select-control"></select>
                         </label>
                         <label class="control-block">
-                            <span class="control-label">&#20107;&#25925; Run</span>
+                            <span class="control-label">事件 Run</span>
                             <select id="incidentRunSelect" class="select-control"></select>
                         </label>
                     </div>
@@ -601,6 +702,14 @@
                                 <span class="meta-key">&#39044;&#27979;&#27493;&#38271;</span>
                                 <span id="predictionHorizon" class="meta-value">--</span>
                             </div>
+                        </div>
+
+                        <div class="movement-switch-section">
+                            <div class="movement-switch-head">
+                                <span>预测对象</span>
+                                <span id="movementSwitchHint" class="movement-switch-hint">--</span>
+                            </div>
+                            <div id="movementSegmentSwitch" class="movement-segment-switch"></div>
                         </div>
 
                         <div class="prediction-mini-grid">
@@ -635,7 +744,7 @@
                                 <span id="compareModelLabel" class="meta-value">--</span>
                             </div>
                             <div class="meta-item">
-                                <span class="meta-key">&#20107;&#25925;&#31867;&#22411;</span>
+                                <span class="meta-key">事件类型</span>
                                 <span id="compareIncidentType" class="meta-value">--</span>
                             </div>
                             <div class="meta-item">
@@ -643,10 +752,12 @@
                                 <span id="compareAnchorStep" class="meta-value">--</span>
                             </div>
                             <div class="meta-item">
-                                <span class="meta-key">&#20107;&#25925;&#36335;&#27573;</span>
+                                <span class="meta-key">影响路段</span>
                                 <span id="compareAffectedEdges" class="meta-value">--</span>
                             </div>
                         </div>
+
+                        <div id="compareIncidentNotice" class="compare-incident-notice">--</div>
 
                         <div class="compare-delta-grid">
                             <div class="delta-card">
@@ -700,6 +811,6 @@
             <div id="incidentList"></div>
         </div>
     </div>
-    <script src="/static/js/main.js?v=20260425_no_signal_panel"></script>
+    <script src="/static/js/main.js?v=20260427_vehicle_marker_scale"></script>
 </body>
 </html>

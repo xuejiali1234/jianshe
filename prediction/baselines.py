@@ -120,6 +120,22 @@ class HistoricalAveragePredictor:
                 "outgoing_edge": movement.get("outgoing_edge", ""),
                 "turn_type": movement.get("turn_type", ""),
                 "tls_id": movement.get("tls_id", ""),
+                "lane_ids": movement.get("lane_ids", []),
+                "lane_count": len(movement.get("lane_ids", [])),
+                "link_index": movement.get("link_index", -1),
+                "link_indexes": movement.get("link_indexes", []),
+                "phase_id": movement.get("phase_id", -1),
+                "green_phase_ids": movement.get("green_phase_ids", []),
+                "incoming_length_m": movement.get("incoming_length_m", 0.0),
+                "zone_length_m": movement.get("zone_length_m", 0.0),
+                "arrival_start_m": movement.get("arrival_start_m", 0.0),
+                "arrival_end_m": movement.get("arrival_end_m", 0.0),
+                "queue_start_m": movement.get("queue_start_m", 0.0),
+                "queue_end_m": movement.get("queue_end_m", 0.0),
+                "upstream_edges": movement.get("upstream_edges", []),
+                "zone_edges": movement.get("zone_edges", []),
+                "zone_lane_m": movement.get("zone_lane_m", 0.0),
+                "zone_quality": movement.get("zone_quality", ""),
             }
             for movement in payload.get("movements", [])
         }

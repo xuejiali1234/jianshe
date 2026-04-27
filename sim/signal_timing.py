@@ -419,6 +419,39 @@ def _build_tls_summaries(
     return summaries
 
 
+def _make_right_turns_permissive(root: ET.Element) -> dict[str, int]:
+    """Keep right turns attached to TLS geometry, but never hold them on red."""
+    right_turn_links: dict[str, set[int]] = {}
+    for connection in root.findall("connection"):
+        if connection.attrib.get("dir") != "r":
+            continue
+        tls_id = connection.attrib.get("tl")
+        link_index = connection.attrib.get("linkIndex")
+        if not tls_id or link_index is None:
+            continue
+        try:
+            right_turn_links.setdefault(tls_id, set()).add(int(link_index))
+        except ValueError:
+            continue
+
+    updated_by_tls: dict[str, int] = {}
+    for tl_logic in root.findall("tlLogic"):
+        tls_id = tl_logic.attrib.get("id", "")
+        link_indexes = right_turn_links.get(tls_id, set())
+        if not link_indexes:
+            continue
+        changed = 0
+        for phase in tl_logic.findall("phase"):
+            state = list(phase.attrib.get("state", ""))
+            for link_index in link_indexes:
+                if 0 <= link_index < len(state) and state[link_index] != "g":
+                    state[link_index] = "g"
+                    changed += 1
+            phase.set("state", "".join(state))
+        updated_by_tls[tls_id] = changed
+    return updated_by_tls
+
+
 def build_webster_signal_net(
     source_net: str | Path,
     output_net: str | Path,
@@ -471,6 +504,8 @@ def build_webster_signal_net(
         for phase_index, duration in zip(summary.green_phase_indices, summary.green_phase_durations):
             phases[phase_index].set("duration", str(int(duration)))
 
+    right_turn_updates = _make_right_turns_permissive(root)
+
     tree.write(output_net_path, encoding="utf-8", xml_declaration=True)
 
     if summary_path:
@@ -490,6 +525,7 @@ def build_webster_signal_net(
                 "green_phase_durations": summary.green_phase_durations,
                 "base_green_phase_durations": summary.base_green_phase_durations,
                 "phase_adjustments": summary.phase_adjustments,
+                "right_turn_permissive_phase_updates": right_turn_updates.get(summary.tls_id, 0),
             }
             for summary in summaries
         ]

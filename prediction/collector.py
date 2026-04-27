@@ -15,6 +15,9 @@ CSV_FIELDS = [
     "demand_scale",
     "base_demand_factor",
     "signal_variant",
+    "event_type",
+    "event_policy",
+    "speed_factor",
     "incident_type",
     "incident_start_s",
     "incident_end_s",
@@ -50,6 +53,9 @@ class EdgeRealtimeCollector:
         demand_scale: float | str = "",
         base_demand_factor: float | str = "",
         signal_variant: str = "webster_base",
+        event_type: str = "",
+        event_policy: str = "",
+        speed_factor: float | str = "",
         incident_type: str = "",
         incident_start_s: int | str = "",
         incident_end_s: int | str = "",
@@ -64,6 +70,9 @@ class EdgeRealtimeCollector:
         self.demand_scale = demand_scale
         self.base_demand_factor = base_demand_factor
         self.signal_variant = signal_variant
+        self.event_type = event_type
+        self.event_policy = event_policy
+        self.speed_factor = speed_factor
         self.incident_type = incident_type
         self.incident_start_s = incident_start_s
         self.incident_end_s = incident_end_s
@@ -156,6 +165,9 @@ class EdgeRealtimeCollector:
             "demand_scale": self.demand_scale,
             "base_demand_factor": self.base_demand_factor,
             "signal_variant": self.signal_variant,
+            "event_type": self.event_type,
+            "event_policy": self.event_policy,
+            "speed_factor": self.speed_factor,
             "incident_type": self.incident_type,
             "incident_start_s": self.incident_start_s,
             "incident_end_s": self.incident_end_s,
@@ -242,6 +254,9 @@ class EdgeRealtimeCollector:
                         "demand_scale": snapshot.get("demand_scale", ""),
                         "base_demand_factor": snapshot.get("base_demand_factor", ""),
                         "signal_variant": snapshot.get("signal_variant", "webster_base"),
+                        "event_type": snapshot.get("event_type", ""),
+                        "event_policy": snapshot.get("event_policy", ""),
+                        "speed_factor": snapshot.get("speed_factor", ""),
                         "incident_type": snapshot.get("incident_type", ""),
                         "incident_start_s": snapshot.get("incident_start_s", ""),
                         "incident_end_s": snapshot.get("incident_end_s", ""),

@@ -28,7 +28,7 @@ from .dataset import (
 from .metrics import append_metrics_csv, regression_metrics
 from .schemas import PredictRequest
 from .service import PredictionService
-from .torch_models import LSTMForecaster, TransformerForecaster
+from .torch_models import LSTMForecaster, SpatioTemporalTransformerForecaster, TransformerForecaster
 
 
 NOTE = "P4 movement-level control-feature closed-loop pipeline"
@@ -36,6 +36,7 @@ ARTIFACT_FILES = [
     "xgboost_model.joblib",
     "lstm_model.pt",
     "transformer_v1_model.pt",
+    "transformer_v2_model.pt",
     "best_model.pt",
     "best_model.joblib",
     "model_registry.json",
@@ -54,10 +55,15 @@ def train_all(
     dataset_dir: str | Path = "data/datasets/p4_movement_control",
     artifact_dir: str | Path = "models/artifacts",
     report_dir: str | Path = "reports",
+    train_ablation: bool = True,
 ) -> dict[str, Any]:
     config = load_prediction_config(config_path)
     dataset = build_dataset_from_csv(csv_path, config, include_control_features=True)
-    ablation_dataset = build_dataset_from_csv(csv_path, config, include_control_features=False)
+    ablation_dataset = (
+        build_dataset_from_csv(csv_path, config, include_control_features=False)
+        if train_ablation
+        else None
+    )
 
     artifact_root = Path(artifact_dir)
     report_root = Path(report_dir)
@@ -67,29 +73,34 @@ def train_all(
 
     dataset.save(dataset_dir)
     ablation_dataset_dir = Path(dataset_dir).with_name(f"{Path(dataset_dir).name}_no_control")
-    ablation_dataset.save(ablation_dataset_dir)
+    if ablation_dataset is not None:
+        ablation_dataset.save(ablation_dataset_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
     ablation_artifact_root = artifact_root / "control_feature_ablation_off"
-    ablation_artifact_root.mkdir(parents=True, exist_ok=True)
+    if ablation_dataset is not None:
+        ablation_artifact_root.mkdir(parents=True, exist_ok=True)
     (report_root / "figures").mkdir(parents=True, exist_ok=True)
 
     metrics_rows, predictions = train_model_suite(dataset, config.device, artifact_root)
-    ablation_rows, ablation_predictions = train_model_suite(
-        ablation_dataset,
-        config.device,
-        ablation_artifact_root,
-    )
+    ablation_rows: list[dict[str, Any]] = []
+    if ablation_dataset is not None:
+        ablation_rows, _ = train_model_suite(
+            ablation_dataset,
+            config.device,
+            ablation_artifact_root,
+        )
 
     append_metrics_csv(report_root / "metrics.csv", metrics_rows)
-    write_control_ablation_csv(
-        report_root / "control_feature_ablation.csv",
-        [
-            annotate_feature_set(row, "with_control") for row in metrics_rows
-        ]
-        + [
-            annotate_feature_set(row, "without_control") for row in ablation_rows
-        ],
-    )
+    if ablation_dataset is not None:
+        write_control_ablation_csv(
+            report_root / "control_feature_ablation.csv",
+            [
+                annotate_feature_set(row, "with_control") for row in metrics_rows
+            ]
+            + [
+                annotate_feature_set(row, "without_control") for row in ablation_rows
+            ],
+        )
     best = select_best(metrics_rows)
     if best:
         write_best_artifact(best["model"], artifact_root)
@@ -110,10 +121,11 @@ def train_all(
         metrics_rows,
         report_root / "figures" / "incident_subset_metrics.png",
     )
-    plot_control_feature_ablation(
-        report_root / "control_feature_ablation.csv",
-        report_root / "figures" / "control_feature_ablation.png",
-    )
+    if ablation_dataset is not None:
+        plot_control_feature_ablation(
+            report_root / "control_feature_ablation.csv",
+            report_root / "figures" / "control_feature_ablation.png",
+        )
 
     summary = {
         "status": "ok",
@@ -128,17 +140,23 @@ def train_all(
             "input_features": int(dataset.X.shape[-1]),
             "output_features": int(dataset.y.shape[-1]),
         },
-        "ablation_dataset": {
-            "X_shape": list(ablation_dataset.X.shape),
-            "y_shape": list(ablation_dataset.y.shape),
-            "input_features": int(ablation_dataset.X.shape[-1]),
-            "output_features": int(ablation_dataset.y.shape[-1]),
-        },
+        "ablation_dataset": (
+            {
+                "X_shape": list(ablation_dataset.X.shape),
+                "y_shape": list(ablation_dataset.y.shape),
+                "input_features": int(ablation_dataset.X.shape[-1]),
+                "output_features": int(ablation_dataset.y.shape[-1]),
+            }
+            if ablation_dataset is not None
+            else {}
+        ),
         "base_demand_factor": config.base_demand_factor,
         "control_features_enabled": True,
         "best_model": best["model"] if best else "ha_baseline",
         "metrics_path": str(report_root / "metrics.csv"),
-        "control_ablation_path": str(report_root / "control_feature_ablation.csv"),
+        "control_ablation_path": str(report_root / "control_feature_ablation.csv")
+        if ablation_dataset is not None
+        else "",
     }
     (report_root / "p4_training_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -191,6 +209,20 @@ def train_model_suite(
         )
     except Exception as exc:
         metrics_rows.append(error_row("transformer_v1", str(exc)))
+
+    try:
+        transformer_v2_pred = train_torch_model(
+            "transformer_v2",
+            dataset,
+            device,
+            artifact_root,
+        )
+        predictions["transformer_v2"] = transformer_v2_pred
+        metrics_rows.extend(
+            rows_for_subsets("transformer_v2", dataset, test_idx, y_true_test, transformer_v2_pred, subset_masks)
+        )
+    except Exception as exc:
+        metrics_rows.append(error_row("transformer_v2", str(exc)))
 
     return metrics_rows, predictions
 
@@ -366,6 +398,22 @@ def train_torch_model(
             "dropout": 0.1,
         }
         model = TransformerForecaster(**model_config)
+    elif kind == "transformer_v2":
+        time_feature_size = 2 if dataset.feature_names[-2:] == ["tod_sin", "tod_cos"] else 0
+        model_config = {
+            "input_size": input_size,
+            "output_size": output_size,
+            "horizon_steps": horizon_steps,
+            "num_entities": len(dataset.edge_ids),
+            "target_size": len(dataset.targets),
+            "time_feature_size": time_feature_size,
+            "d_model": 96,
+            "n_heads": 4,
+            "temporal_layers": 2,
+            "spatial_layers": 2,
+            "dropout": 0.1,
+        }
+        model = SpatioTemporalTransformerForecaster(**model_config)
     else:
         raise ValueError(f"Unknown torch model kind: {kind}")
 
@@ -482,6 +530,7 @@ def write_best_artifact(model_name: str, artifact_root: Path) -> None:
         "xgboost": artifact_root / "xgboost_model.joblib",
         "lstm": artifact_root / "lstm_model.pt",
         "transformer_v1": artifact_root / "transformer_v1_model.pt",
+        "transformer_v2": artifact_root / "transformer_v2_model.pt",
     }
     source = source_by_model.get(model_name)
     active_artifact = source.name if source and source.exists() else ""
@@ -719,6 +768,11 @@ def main() -> None:
     parser.add_argument("--artifact-dir", default="models/artifacts")
     parser.add_argument("--report-dir", default="reports")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument(
+        "--skip-ablation",
+        action="store_true",
+        help="Skip the no-control-feature ablation run for faster V2 validation.",
+    )
     args = parser.parse_args()
 
     summary = train_all(
@@ -727,6 +781,7 @@ def main() -> None:
         args.dataset_dir,
         args.artifact_dir,
         args.report_dir,
+        train_ablation=not args.skip_ablation,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.smoke_test:

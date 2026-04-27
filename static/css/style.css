@@ -4,6 +4,10 @@
 .map-container { flex: 1; position: relative; width: 100%; height: 100%; }
 #amapContainer { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
 #radarCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+.vehicle-icon { position: relative; left: 0; top: 0; transform-origin: 50% 50%; pointer-events: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.55)); }
+.vehicle-icon svg { display: block; overflow: visible; }
+.vehicle-car-icon img { display: block; width: 100%; height: 100%; object-fit: contain; user-select: none; pointer-events: none; }
+.vehicle-pedestrian { transform: translate(-50%, -50%); }
 #alignment-panel { position: absolute; top: 20px; left: 20px; z-index: 1000; background: rgba(255, 255, 255, 0.9); color: #333; padding: 15px; border: 1px solid #1890ff; border-radius: 8px; font-size: 13px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: flex; flex-direction: column; gap: 8px; }
 #alignment-panel div { display: flex; justify-content: space-between; align-items: center; }
 #alignment-panel input { width: 70px; background: #f0f2f5; color: #333; border: 1px solid #ccc; border-radius: 4px; padding: 2px 4px; margin-left: 10px; }

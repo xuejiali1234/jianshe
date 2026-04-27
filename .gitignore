@@ -17,6 +17,7 @@ data/raw/*
 data/processed/*
 data/datasets/*
 data/archive/
+data/tmp*/
 
 # Keep lightweight data docs/placeholders
 !data/README.md
@@ -26,11 +27,13 @@ data/archive/
 
 # Trained model artifacts and generated reports
 models/artifacts/
+models/artifacts*/
 *.pt
 *.pth
 *.joblib
 *.pkl
 reports/figures/
+reports/*_training/
 reports/*.csv
 reports/*.json
 

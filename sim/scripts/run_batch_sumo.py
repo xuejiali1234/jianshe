@@ -28,12 +28,17 @@ OUTPUT_CSV = PROJECT_ROOT / "data" / "raw" / "batch_movement_aggregates.csv"
 LEGACY_EDGE_OUTPUT_CSV = PROJECT_ROOT / "data" / "raw" / "batch_edge_aggregates.csv"
 ARCHIVE_ROOT = PROJECT_ROOT / "data" / "archive"
 
-INCIDENT_WINDOW = (1200, 2100)
-INCIDENT_SPEED_FACTOR = 0.25
-INCIDENT_TEMPLATES = {
+EVENT_WINDOW = (1200, 2100)
+VSL_SPEED_FACTOR = 0.25
+VSL_TEMPLATES = {
     "mainline_drop": ("472652453#2", "472652453#3"),
     "downstream_drop": ("1324604419#0", "1324604419#1"),
 }
+INCIDENT_CLOSURE_TEMPLATES = {
+    "mainline_edge_closure": ("472652453#2", "472652453#3"),
+    "downstream_edge_closure": ("1324604419#0", "1324604419#1"),
+}
+EVENT_VCLASS_BLOCKLIST = ("passenger",)
 SIGNAL_VARIANT_GREEN_SCALES = {
     "webster_base": 1.0,
     "short_cycle": 0.80,
@@ -51,22 +56,27 @@ class Scenario:
     incident_end_s: int = 0
     affected_edges: tuple[str, ...] = field(default_factory=tuple)
     signal_variant: str = "webster_base"
+    event_type: str = ""
+    event_policy: str = ""
+    speed_factor: float = 1.0
 
     @property
     def run_id(self) -> str:
         scale_tag = f"{self.demand_scale:.2f}".replace(".", "p")
         if self.scenario_id == "S3_control":
             return f"S3_control_{self.signal_variant}_scale_{scale_tag}_seed_{self.seed}"
-        if self.incident_type:
-            return f"S4_incident_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
+        if self.scenario_id == "S4_vsl":
+            return f"S4_vsl_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
+        if self.scenario_id == "S5_incident":
+            return f"S5_incident_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
         return f"{self.scenario_id}_scale_{scale_tag}_seed_{self.seed}"
 
     @property
-    def is_incident(self) -> bool:
-        return bool(self.incident_type and self.affected_edges)
+    def is_event(self) -> bool:
+        return bool(self.event_type and self.affected_edges)
 
 
-def default_scenarios() -> list[Scenario]:
+def default_scenarios(preset: str = "full") -> list[Scenario]:
     groups = [
         ("S1_normal", [0.60, 0.80, 1.00]),
         ("S2_peak", [1.10, 1.20, 1.30]),
@@ -79,7 +89,7 @@ def default_scenarios() -> list[Scenario]:
         for scale in scales
         for seed in seeds
     ]
-    incident_scales = [1.10, 1.30, 1.50]
+    event_scales = [1.10, 1.30, 1.50]
     control = [
         Scenario(
             scenario_id="S3_control",
@@ -91,21 +101,51 @@ def default_scenarios() -> list[Scenario]:
         for scale in (1.10, 1.30)
         for seed in seeds
     ]
-    incident = [
+    vsl = [
         Scenario(
-            scenario_id="S4_incident",
+            scenario_id="S4_vsl",
             demand_scale=scale,
             seed=seed,
             incident_type=incident_type,
-            incident_start_s=INCIDENT_WINDOW[0],
-            incident_end_s=INCIDENT_WINDOW[1],
+            incident_start_s=EVENT_WINDOW[0],
+            incident_end_s=EVENT_WINDOW[1],
             affected_edges=tuple(affected_edges),
+            event_type="vsl_speed_drop",
+            event_policy="variable_speed_limit",
+            speed_factor=VSL_SPEED_FACTOR,
         )
-        for incident_type, affected_edges in INCIDENT_TEMPLATES.items()
-        for scale in incident_scales
+        for incident_type, affected_edges in VSL_TEMPLATES.items()
+        for scale in event_scales
         for seed in seeds
     ]
-    return [*regular, *incident, *control]
+    closures = [
+        Scenario(
+            scenario_id="S5_incident",
+            demand_scale=scale,
+            seed=seed,
+            incident_type=incident_type,
+            incident_start_s=EVENT_WINDOW[0],
+            incident_end_s=EVENT_WINDOW[1],
+            affected_edges=tuple(affected_edges),
+            event_type="incident_closure",
+            event_policy="edge_passenger_closure",
+            speed_factor=0.0,
+        )
+        for incident_type, affected_edges in INCIDENT_CLOSURE_TEMPLATES.items()
+        for scale in event_scales
+        for seed in seeds
+    ]
+    scenarios = [*regular, *vsl, *closures, *control]
+    if preset == "full":
+        return scenarios
+    if preset == "fast_v2":
+        return [
+            scenario
+            for scenario in scenarios
+            if scenario.scenario_id != "S4_vsl"
+            or abs(scenario.demand_scale - 1.30) < 1e-6
+        ]
+    raise ValueError(f"Unknown scenario preset: {preset}")
 
 
 def output_csv_for_collector(collector_mode: str, output_csv: Path | None = None) -> Path:
@@ -163,6 +203,9 @@ def write_manifest(rows: list[dict], manifest_path: Path | None = None) -> None:
                 "demand_scale",
                 "base_demand_factor",
                 "signal_variant",
+                "event_type",
+                "event_policy",
+                "speed_factor",
                 "incident_type",
                 "incident_start_s",
                 "incident_end_s",
@@ -207,28 +250,68 @@ def prepare_signal_variant_net(source_net: Path, signal_variant: str, net_dir: P
     return output_path
 
 
-def apply_incident_controls(
+def collect_lane_disallowed_baseline(
+    scenario: Scenario,
+    net_obj: sumolib.net.Net,
+) -> dict[str, tuple[str, ...]]:
+    if scenario.event_type != "incident_closure":
+        return {}
+    lane_disallowed: dict[str, tuple[str, ...]] = {}
+    for edge_id in scenario.affected_edges:
+        try:
+            edge = net_obj.getEdge(edge_id)
+        except Exception:
+            continue
+        for lane in edge.getLanes():
+            lane_id = lane.getID()
+            try:
+                lane_disallowed[lane_id] = tuple(traci.lane.getDisallowed(lane_id))
+            except Exception:
+                lane_disallowed[lane_id] = tuple()
+    return lane_disallowed
+
+
+def apply_event_controls(
     scenario: Scenario,
     sim_time_s: float,
     baseline_speeds: dict[str, float],
-    incident_applied: bool,
+    baseline_lane_disallowed: dict[str, tuple[str, ...]],
+    event_applied: bool,
 ) -> tuple[bool, set[str]]:
-    if not scenario.is_incident:
+    if not scenario.is_event:
         return False, set()
 
-    incident_active = scenario.incident_start_s <= sim_time_s <= scenario.incident_end_s
+    event_active = scenario.incident_start_s <= sim_time_s <= scenario.incident_end_s
     affected = set(scenario.affected_edges)
 
-    if incident_active and not incident_applied:
-        for edge_id, base_speed in baseline_speeds.items():
-            traci.edge.setMaxSpeed(edge_id, max(0.1, base_speed * INCIDENT_SPEED_FACTOR))
-        incident_applied = True
-    elif not incident_active and incident_applied:
+    if event_active and not event_applied:
+        if scenario.event_type == "vsl_speed_drop":
+            speed_factor = scenario.speed_factor if scenario.speed_factor > 0 else VSL_SPEED_FACTOR
+            for edge_id, base_speed in baseline_speeds.items():
+                traci.edge.setMaxSpeed(edge_id, max(0.1, base_speed * speed_factor))
+        elif scenario.event_type == "incident_closure":
+            for lane_id, disallowed in baseline_lane_disallowed.items():
+                merged = sorted(set(disallowed) | set(EVENT_VCLASS_BLOCKLIST))
+                traci.lane.setDisallowed(lane_id, merged)
+        event_applied = True
+    elif not event_active and event_applied:
+        restore_event_controls(scenario, baseline_speeds, baseline_lane_disallowed)
+        event_applied = False
+
+    return event_applied, affected if event_active else set()
+
+
+def restore_event_controls(
+    scenario: Scenario,
+    baseline_speeds: dict[str, float],
+    baseline_lane_disallowed: dict[str, tuple[str, ...]],
+) -> None:
+    if scenario.event_type == "vsl_speed_drop":
         for edge_id, base_speed in baseline_speeds.items():
             traci.edge.setMaxSpeed(edge_id, base_speed)
-        incident_applied = False
-
-    return incident_applied, affected if incident_active else set()
+    elif scenario.event_type == "incident_closure":
+        for lane_id, disallowed in baseline_lane_disallowed.items():
+            traci.lane.setDisallowed(lane_id, list(disallowed))
 
 
 def run_one_scenario(
@@ -258,6 +341,9 @@ def run_one_scenario(
         "demand_scale": scenario.demand_scale,
         "base_demand_factor": base_demand_factor,
         "signal_variant": scenario.signal_variant,
+        "event_type": scenario.event_type,
+        "event_policy": scenario.event_policy,
+        "speed_factor": scenario.speed_factor,
         "incident_type": scenario.incident_type,
         "incident_start_s": scenario.incident_start_s or "",
         "incident_end_s": scenario.incident_end_s or "",
@@ -318,32 +404,33 @@ def run_one_scenario(
     }
 
     snapshots = 0
-    incident_applied = False
+    event_applied = False
     try:
         traci.start(cmd)
+        baseline_lane_disallowed = collect_lane_disallowed_baseline(scenario, net_obj)
         step = 0
         while traci.simulation.getMinExpectedNumber() > 0 and step < sim_end:
             traci.simulationStep()
             sim_time_s = float(traci.simulation.getTime())
-            incident_applied, incident_edges = apply_incident_controls(
+            event_applied, event_edges = apply_event_controls(
                 scenario,
                 sim_time_s,
                 baseline_speeds,
-                incident_applied,
+                baseline_lane_disallowed,
+                event_applied,
             )
             snapshot = collector.record_step(
                 traci,
                 step,
                 sim_time_s,
-                incident_edges=incident_edges,
+                incident_edges=event_edges,
             )
             if snapshot:
                 snapshots += 1
             step += 1
 
-        if incident_applied:
-            for edge_id, base_speed in baseline_speeds.items():
-                traci.edge.setMaxSpeed(edge_id, base_speed)
+        if event_applied:
+            restore_event_controls(scenario, baseline_speeds, baseline_lane_disallowed)
         traci.close()
         return {
             "run_id": scenario.run_id,
@@ -352,6 +439,9 @@ def run_one_scenario(
             "demand_scale": scenario.demand_scale,
             "base_demand_factor": base_demand_factor,
             "signal_variant": scenario.signal_variant,
+            "event_type": scenario.event_type,
+            "event_policy": scenario.event_policy,
+            "speed_factor": scenario.speed_factor,
             "incident_type": scenario.incident_type,
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
@@ -364,9 +454,8 @@ def run_one_scenario(
         }
     except Exception as exc:
         try:
-            if incident_applied:
-                for edge_id, base_speed in baseline_speeds.items():
-                    traci.edge.setMaxSpeed(edge_id, base_speed)
+            if event_applied:
+                restore_event_controls(scenario, baseline_speeds, locals().get("baseline_lane_disallowed", {}))
             traci.close()
         except Exception:
             pass
@@ -377,6 +466,9 @@ def run_one_scenario(
             "demand_scale": scenario.demand_scale,
             "base_demand_factor": base_demand_factor,
             "signal_variant": scenario.signal_variant,
+            "event_type": scenario.event_type,
+            "event_policy": scenario.event_policy,
+            "speed_factor": scenario.speed_factor,
             "incident_type": scenario.incident_type,
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
@@ -398,6 +490,8 @@ def run_batch(
     movement_config_path: Path | None = None,
     output_csv: Path | None = None,
     scenario_dir: Path | None = None,
+    scenario_filter: str = "",
+    scenario_preset: str = "full",
 ) -> list[dict]:
     config = load_prediction_config(config_path)
     runtime_net_file = resolve_runtime_net_file(PROJECT_ROOT, config.sumo_net_file)
@@ -424,7 +518,7 @@ def run_batch(
     if not overwrite and any(path.exists() for path in [selected_output_csv, manifest_path, route_dir]):
         raise RuntimeError(
             "Existing batch outputs detected. Re-run with --overwrite to archive the current raw outputs "
-            "before generating the low-demand incident dataset."
+            "before generating the low-demand event dataset."
         )
     archive_dir = (
         archive_existing_outputs(collector_mode, output_csv, manifest_path, route_dir, net_dir)
@@ -434,7 +528,16 @@ def run_batch(
     if archive_dir:
         print(f"archived previous raw outputs to {archive_dir}")
 
-    scenarios = default_scenarios()
+    scenarios = default_scenarios(scenario_preset)
+    if scenario_filter:
+        needle = scenario_filter.lower()
+        scenarios = [
+            scenario for scenario in scenarios
+            if needle in scenario.run_id.lower()
+            or needle in scenario.scenario_id.lower()
+            or needle in scenario.event_type.lower()
+            or needle in scenario.incident_type.lower()
+        ]
     if limit is not None:
         scenarios = scenarios[:limit]
 
@@ -461,7 +564,7 @@ def run_batch(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run demand-scale and incident SUMO batch simulations.")
+    parser = argparse.ArgumentParser(description="Run demand-scale, VSL, closure, and control SUMO batch simulations.")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "prediction_config.json"))
     parser.add_argument("--sim-end", type=int, default=3600)
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N scenarios for testing.")
@@ -470,6 +573,17 @@ def main() -> None:
     parser.add_argument("--movement-config", default=None)
     parser.add_argument("--output-csv", type=Path, default=None)
     parser.add_argument("--scenario-dir", type=Path, default=None)
+    parser.add_argument(
+        "--scenario-preset",
+        choices=["full", "fast_v2"],
+        default="full",
+        help="Use full 72-run scenario suite or the 60-run fast V2 suite with reduced S4 VSL runs.",
+    )
+    parser.add_argument(
+        "--scenario-filter",
+        default="",
+        help="Run only scenarios whose run_id/scenario_id/event_type/incident_type contains this text.",
+    )
     args = parser.parse_args()
 
     rows = run_batch(
@@ -481,10 +595,13 @@ def main() -> None:
         Path(args.movement_config) if args.movement_config else None,
         args.output_csv,
         args.scenario_dir,
+        args.scenario_filter,
+        args.scenario_preset,
     )
     ok_count = sum(1 for row in rows if row["status"] == "ok")
     print(f"finished {ok_count}/{len(rows)} scenarios")
     print(f"collector: {args.collector}")
+    print(f"scenario preset: {args.scenario_preset}")
     print(f"csv: {output_csv_for_collector(args.collector, args.output_csv)}")
     print(f"manifest: {paths_for_scenario_dir(args.scenario_dir)[0]}")
 
