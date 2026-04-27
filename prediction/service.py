@@ -4,6 +4,7 @@ import csv
 from collections import deque
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 import pandas as pd
@@ -42,6 +43,8 @@ class PredictionService:
         self._manifest_cache_mtime: float | None = None
         self._batch_cache: pd.DataFrame | None = None
         self._batch_cache_mtime: float | None = None
+        self._last_fallback_used = False
+        self._last_prediction_latency_ms = 0.0
         self.trained_predictor = ArtifactPredictor.load_best(config, self.artifact_dir)
         if self.trained_predictor is not None:
             self._predictor_cache[self.trained_predictor.model_name] = self.trained_predictor
@@ -58,11 +61,20 @@ class PredictionService:
             self.available_models.append(self.active_model)
         registry_active_model = self._read_registry_active_model()
         if (
+            getattr(self.config, "active_model_from_registry", True)
+            and
             registry_active_model
             and registry_active_model in self.available_models
             and registry_active_model != self.active_model
         ):
             self.switch_model(registry_active_model)
+        elif (
+            not registry_active_model
+            and getattr(self.config, "preferred_model", "")
+            and self.config.preferred_model in self.available_models
+            and self.config.preferred_model != self.active_model
+        ):
+            self.switch_model(self.config.preferred_model)
 
     def config_payload(self) -> dict[str, Any]:
         public_config = self.config.public_dict()
@@ -95,6 +107,11 @@ class PredictionService:
             "trained_artifact": str(self.trained_predictor.artifact_path)
             if self.trained_predictor
             else None,
+            "fallback_used": bool(self._last_fallback_used),
+            "prediction_latency_ms": round(float(self._last_prediction_latency_ms), 3),
+            "model_artifact_path": self._active_model_artifact_path(),
+            "registry_active_model": self._read_registry_active_model(),
+            "phase_summary_available": bool(self.latest_prediction.get("movements")),
             "scenario_compare_available": self.batch_csv_path.exists() and self.manifest_path.exists(),
         }
 
@@ -135,7 +152,11 @@ class PredictionService:
     ) -> dict[str, Any]:
         predictor = self._resolve_predictor(model_name or self.active_model)
         horizon = request.horizon or self.config.horizon_steps
-        payload = self._predict_with_specific_predictor(predictor, request.window, horizon)
+        started = time.perf_counter()
+        try:
+            payload = self._predict_with_specific_predictor(predictor, request.window, horizon)
+        finally:
+            self._last_prediction_latency_ms = (time.perf_counter() - started) * 1000.0
         return self._attach_prediction_meta(payload, len(request.window), model_name or self.active_model)
 
     def switch_model(self, model_name: str) -> dict[str, Any]:
@@ -390,7 +411,11 @@ class PredictionService:
         return window, future
 
     def _predict_with_fallback(self, window: list[Any], horizon: int) -> dict[str, Any]:
-        return self._predict_with_specific_predictor(self.predictor, window, horizon)
+        started = time.perf_counter()
+        try:
+            return self._predict_with_specific_predictor(self.predictor, window, horizon)
+        finally:
+            self._last_prediction_latency_ms = (time.perf_counter() - started) * 1000.0
 
     def _predict_with_specific_predictor(
         self,
@@ -398,12 +423,16 @@ class PredictionService:
         window: list[Any],
         horizon: int,
     ) -> dict[str, Any]:
+        self._last_fallback_used = False
         if isinstance(predictor, ArtifactPredictor):
             if len(window) >= self.config.history_steps:
                 try:
                     return predictor.predict(window, horizon)
                 except Exception as exc:
                     print(f"Trained predictor failed; falling back to HA baseline: {exc}")
+                    self._last_fallback_used = True
+            else:
+                self._last_fallback_used = True
             return self.fallback_predictor.predict(window, horizon)
         return predictor.predict(window, horizon)
 
@@ -432,6 +461,9 @@ class PredictionService:
         enriched["history_size"] = int(history_size)
         enriched["history_required"] = int(self.config.history_steps)
         enriched["active_model"] = active_model_name or self.active_model
+        enriched["fallback_used"] = bool(self._last_fallback_used)
+        enriched["prediction_latency_ms"] = round(float(self._last_prediction_latency_ms), 3)
+        enriched["phase_summary_available"] = bool(enriched.get("movements"))
         return enriched
 
     def _movement_metadata_by_id(self) -> dict[str, dict[str, Any]]:
@@ -580,6 +612,14 @@ class PredictionService:
             return None
         active_model = registry.get("active_model")
         return str(active_model) if active_model else None
+
+    def _active_model_artifact_path(self) -> str | None:
+        predictor = self._predictor_cache.get(self.active_model)
+        if isinstance(predictor, ArtifactPredictor):
+            return str(predictor.artifact_path)
+        if isinstance(self.predictor, ArtifactPredictor):
+            return str(self.predictor.artifact_path)
+        return None
 
     def _load_model_metrics(self) -> dict[str, dict[str, float | int | str]]:
         if not self.metrics_path.exists():

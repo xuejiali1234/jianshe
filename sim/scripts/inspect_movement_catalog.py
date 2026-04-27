@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -60,6 +60,26 @@ def inspect_movement_catalog(
             if str(movement.get("zone_quality", "")) != "ok"
         }
     )
+    movement_ids = [str(movement.get("movement_id", "")) for movement in movements]
+    duplicate_ids = sorted(
+        movement_id
+        for movement_id, count in Counter(movement_ids).items()
+        if movement_id and count > 1
+    )
+    phase_missing = [
+        str(movement.get("movement_id", ""))
+        for movement in movements
+        if _safe_int(movement.get("phase_id"), -1) < 0
+        or not movement.get("green_phase_ids")
+    ]
+    short_zone_movements = [
+        str(movement.get("movement_id", ""))
+        for movement in movements
+        if _safe_float(movement.get("zone_length_m"), 0.0) < 80.0
+    ]
+    zone_quality_summary = dict(
+        Counter(str(movement.get("zone_quality", "unknown") or "unknown") for movement in movements)
+    )
     tls_summary = [
         {
             "tls_id": tls_id,
@@ -75,6 +95,14 @@ def inspect_movement_catalog(
         "turn_type_counts": payload.get("turn_type_counts", turn_counts(movements)),
         "tls_count": len(by_tls),
         "tls_summary": tls_summary,
+        "duplicate_movement_ids": duplicate_ids,
+        "duplicate_movement_id_count": len(duplicate_ids),
+        "phase_missing_count": len(phase_missing),
+        "phase_missing_movements": phase_missing[:50],
+        "short_zone_count": len(short_zone_movements),
+        "short_zone_movements": short_zone_movements[:50],
+        "short_upstream_count": len(short_edges),
+        "zone_quality_summary": zone_quality_summary,
         "observed_edges_without_movements": missing_edges,
         "short_upstream_edges": short_edges,
         "quality_report": str(report),
@@ -128,6 +156,20 @@ def turn_counts(movements: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def print_human_summary(summary: dict[str, Any]) -> None:
     print(f"movement_count={summary['movement_count']}")
     print(f"tls_count={summary['tls_count']}")
@@ -154,6 +196,7 @@ def main() -> None:
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "prediction_config.json"))
     parser.add_argument("--movement-config", default=None)
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
+    parser.add_argument("--out", default=None, help="Write machine-readable JSON summary to this path.")
     parser.add_argument("--rebuild", action="store_true")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary.")
     args = parser.parse_args()
@@ -164,6 +207,12 @@ def main() -> None:
         args.report,
         args.rebuild,
     )
+    if args.out:
+        out_path = Path(args.out)
+        if not out_path.is_absolute():
+            out_path = PROJECT_ROOT / out_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     else:

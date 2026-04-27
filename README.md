@@ -353,3 +353,26 @@ git config --local https.proxy http://127.0.0.1:7892
 ```
 
 4. 当前模型训练结果依赖本地生成的数据。更改 `observed_edges`、`base_demand_factor` 或信号灯路网后，需要重新生成数据并重新训练模型。
+# 当前默认链路（2026-04-27）
+
+当前项目默认采用 **movement 级预测链路**，预测对象不是短进口 edge，而是 `tls_id + incoming_edge + turn_type + outgoing_edge` 组成的转向 movement。虚拟检测区默认向上游补足约 `150m`，用于统计 `arrival_flow / mean_speed / queue_veh`。
+
+默认数据、模型和报告路径：
+
+- 批量训练数据：`data/raw/batch_movement_aggregates_fast_v2.csv`
+- 场景清单：`data/raw/scenarios_fast_v2/manifest.csv`
+- 模型产物：`models/artifacts_fast_v2`
+- 指标报告：`reports/fast_v2_training/metrics.csv`
+- 默认路网：`data/processed/czq_tls_webster.net.xml`
+
+当前模型族包含：`HA / XGBoost / LSTM / Transformer V1 / Transformer V2`。服务启动时优先读取 `models/artifacts_fast_v2/model_registry.json` 的 active model，加载失败或历史窗口不足时自动回退到 `ha_baseline`。
+
+常用非训练检查命令：
+
+```cmd
+python -m sim.scripts.inspect_movement_catalog --movement-config configs/movement_config.json --out reports/movement_catalog_quality.json
+python -m sim.scripts.diagnose_movement_data --csv data/raw/batch_movement_aggregates_fast_v2.csv --manifest data/raw/scenarios_fast_v2/manifest.csv --out reports/movement_data_quality_fast_v2.json
+python -m sim.scripts.build_movement_graph --movement-config configs/movement_config.json --out data/processed/movement_graph.json
+python -m rl.evaluate_policy --config configs/rl_signal_config.json --policy webster --sim-end 600 --out reports/rl_signal_control/webster_smoke.csv
+python -m rl.evaluate_policy --config configs/rl_signal_config.json --policy max_pressure --sim-end 600 --out reports/rl_signal_control/max_pressure_smoke.csv
+```

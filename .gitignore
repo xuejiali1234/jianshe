@@ -36,6 +36,9 @@ reports/figures/
 reports/*_training/
 reports/*.csv
 reports/*.json
+reports/**/*.csv
+reports/**/*.json
+reports/rl_signal_control/
 
 # Keep lightweight docs/placeholders
 !models/README.md
@@ -53,3 +56,6 @@ reports/*.json
 .idea/
 .DS_Store
 Thumbs.db
+~$*
+*_next_step_plan.docx
+static/assets/*_source.png

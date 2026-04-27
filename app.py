@@ -181,6 +181,63 @@ def out_of_china(lng, lat):
     return not (72.004 <= lng <= 137.8347 and 0.8293 <= lat <= 55.8271)
 
 
+def xy_to_gcj_lnglat(x, y):
+    lon_wgs, lat_wgs = net_obj.convertXY2LonLat(x, y)
+    return list(wgs84_to_gcj02(lon_wgs, lat_wgs))
+
+
+def build_stopbar_segment(lane_shape, half_width_m=3.2, backoff_m=1.2):
+    if not lane_shape or len(lane_shape) < 2:
+        return None
+    end_x, end_y = lane_shape[-1]
+    prev_x, prev_y = lane_shape[-2]
+    dx = end_x - prev_x
+    dy = end_y - prev_y
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return None
+    ux = dx / length
+    uy = dy / length
+    center_x = end_x - ux * backoff_m
+    center_y = end_y - uy * backoff_m
+    perp_x = -uy
+    perp_y = ux
+    left = (center_x - perp_x * half_width_m, center_y - perp_y * half_width_m)
+    right = (center_x + perp_x * half_width_m, center_y + perp_y * half_width_m)
+    return [xy_to_gcj_lnglat(*left), xy_to_gcj_lnglat(*right)]
+
+
+def build_signal_stopbars():
+    stopbars = []
+    seen = set()
+    for edge in net_obj.getEdges():
+        if edge.getFunction() == "internal":
+            continue
+        for lane in edge.getLanes():
+            segment = build_stopbar_segment(lane.getShape())
+            if not segment:
+                continue
+            for connection in lane.getOutgoing() or []:
+                tls_id = connection.getTLSID() if hasattr(connection, "getTLSID") else ""
+                link_index = connection.getTLLinkIndex() if hasattr(connection, "getTLLinkIndex") else -1
+                if not tls_id or link_index is None or link_index < 0:
+                    continue
+                key = (tls_id, link_index, lane.getID())
+                if key in seen:
+                    continue
+                seen.add(key)
+                stopbars.append({
+                    "tlsId": tls_id,
+                    "linkIndex": int(link_index),
+                    "edgeId": edge.getID(),
+                    "laneId": lane.getID(),
+                    "toEdgeId": connection.getTo().getID() if hasattr(connection, "getTo") else "",
+                    "dir": connection.getDirection() if hasattr(connection, "getDirection") else "",
+                    "shape": segment,
+                })
+    return stopbars
+
+
 @app.get("/")
 async def get_index():
     return FileResponse("static/index.html")
@@ -205,7 +262,7 @@ async def get_network():
                     "isInternal": is_internal,
                     "dirs": dirs
                 })
-        return {"status": "ok", "lanes": lanes}
+        return {"status": "ok", "lanes": lanes, "signalStopbars": build_signal_stopbars()}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

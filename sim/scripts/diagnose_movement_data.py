@@ -17,6 +17,7 @@ DEFAULT_APPROACHES = PROJECT_ROOT / "reports" / "movement_approach_bottlenecks.c
 
 def diagnose_movement_data(
     csv_path: str | Path = DEFAULT_CSV,
+    manifest_path: str | Path | None = None,
     summary_path: str | Path = DEFAULT_SUMMARY,
     bottleneck_path: str | Path = DEFAULT_BOTTLENECKS,
     approach_path: str | Path = DEFAULT_APPROACHES,
@@ -61,6 +62,81 @@ def diagnose_movement_data(
         if not active.empty
         else {}
     )
+    target_columns = [column for column in ["arrival_flow", "mean_speed_mps", "speed_kmh", "queue_veh"] if column in df.columns]
+    target_summary = {
+        column: {
+            "mean": _mean(df[column]),
+            "p50": _quantile(df[column], 0.5),
+            "p90": _quantile(df[column], 0.9),
+            "max": round(float(df[column].max()), 4) if len(df[column]) else 0.0,
+            "nonzero_share": round(float((df[column] != 0).mean()), 4) if len(df[column]) else 0.0,
+        }
+        for column in target_columns
+    }
+    scenario_counts = (
+        df.groupby("scenario_id")["run_id"].nunique().astype(int).to_dict()
+        if "run_id" in df.columns
+        else df["scenario_id"].value_counts().astype(int).to_dict()
+    )
+    event_counts = (
+        df.groupby("event_type")["run_id"].nunique().astype(int).to_dict()
+        if "event_type" in df.columns and "run_id" in df.columns
+        else {}
+    )
+    signal_variant_counts = (
+        df.groupby("signal_variant")["run_id"].nunique().astype(int).to_dict()
+        if "signal_variant" in df.columns and "run_id" in df.columns
+        else {}
+    )
+    turn_type_summary = (
+        df.groupby("turn_type", dropna=False)
+        .agg(
+            rows=("movement_id", "size"),
+            movement_count=("movement_id", "nunique"),
+            arrival_flow_mean=("arrival_flow", "mean"),
+            arrival_flow_sum=("arrival_flow", "sum"),
+            queue_veh_mean=("queue_veh", "mean"),
+            queue_veh_max=("queue_veh", "max"),
+            speed_kmh_mean=("speed_kmh", "mean"),
+        )
+        .round(4)
+        .reset_index()
+        .to_dict(orient="records")
+    )
+    tls_sample_summary = (
+        df.groupby("tls_id", dropna=False)
+        .agg(
+            rows=("movement_id", "size"),
+            movement_count=("movement_id", "nunique"),
+            arrival_flow_sum=("arrival_flow", "sum"),
+            queue_veh_mean=("queue_veh", "mean"),
+            queue_veh_max=("queue_veh", "max"),
+        )
+        .round(4)
+        .reset_index()
+        .to_dict(orient="records")
+    )
+    manifest_summary: dict[str, Any] = {}
+    if manifest_path:
+        manifest_source = Path(manifest_path)
+        if manifest_source.exists():
+            manifest = pd.read_csv(manifest_source, low_memory=False).fillna("")
+            manifest_summary = {
+                "manifest": str(manifest_source),
+                "run_count": int(len(manifest)),
+                "status_counts": manifest["status"].value_counts().astype(int).to_dict()
+                if "status" in manifest.columns
+                else {},
+                "scenario_counts": manifest["scenario_id"].value_counts().astype(int).to_dict()
+                if "scenario_id" in manifest.columns
+                else {},
+                "event_type_counts": manifest["event_type"].value_counts().astype(int).to_dict()
+                if "event_type" in manifest.columns
+                else {},
+                "signal_variant_counts": manifest["signal_variant"].value_counts().astype(int).to_dict()
+                if "signal_variant" in manifest.columns
+                else {},
+            }
 
     movement_stats = (
         df.groupby(["tls_id", "incoming_edge", "movement_id", "turn_type"], dropna=False)
@@ -126,6 +202,14 @@ def diagnose_movement_data(
         "rows": int(len(df)),
         "run_count": int(df["run_id"].nunique()) if "run_id" in df.columns else None,
         "movement_count": int(df["movement_id"].nunique()),
+        "step_count": int(df["step"].nunique()) if "step" in df.columns else None,
+        "scenario_counts": scenario_counts,
+        "event_counts": event_counts,
+        "signal_variant_counts": signal_variant_counts,
+        "target_summary": target_summary,
+        "turn_type_summary": turn_type_summary,
+        "tls_sample_summary": tls_sample_summary,
+        "manifest_summary": manifest_summary,
         "speed_summary": speed_summary,
         "active_speed_by_scenario": scenario_speed,
         "top_bottleneck_movements": movement_top.to_dict(orient="records"),
@@ -149,6 +233,12 @@ def _mean(series: pd.Series) -> float:
     return round(float(series.mean()), 4)
 
 
+def _quantile(series: pd.Series, q: float) -> float:
+    if series.empty:
+        return 0.0
+    return round(float(series.quantile(q)), 4)
+
+
 def _weighted_mean(df: pd.DataFrame, value_col: str, weight_col: str) -> float:
     weight_sum = float(df[weight_col].sum())
     if weight_sum <= 1e-9:
@@ -159,14 +249,18 @@ def _weighted_mean(df: pd.DataFrame, value_col: str, weight_col: str) -> float:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Diagnose movement-level speed and bottlenecks.")
     parser.add_argument("--csv", default=str(DEFAULT_CSV))
+    parser.add_argument("--manifest", default=None)
     parser.add_argument("--summary", default=str(DEFAULT_SUMMARY))
+    parser.add_argument("--out", default=None, help="Alias for --summary.")
     parser.add_argument("--bottlenecks", default=str(DEFAULT_BOTTLENECKS))
     parser.add_argument("--approaches", default=str(DEFAULT_APPROACHES))
     parser.add_argument("--top-n", type=int, default=30)
     args = parser.parse_args()
+    summary_path = args.out or args.summary
     summary = diagnose_movement_data(
         args.csv,
-        args.summary,
+        args.manifest,
+        summary_path,
         args.bottlenecks,
         args.approaches,
         args.top_n,

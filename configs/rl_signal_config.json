@@ -1,0 +1,38 @@
+{
+  "sumo_cfg": "intersection.sumocfg",
+  "net_file": "data/processed/czq_tls_webster.net.xml",
+  "route_file": "czq_demand.rou.xml",
+  "movement_config": "configs/movement_config.json",
+  "prediction_config": "configs/prediction_config.json",
+  "target_tls_id": "12254671324",
+  "control_interval_s": 10,
+  "sample_interval_s": 60,
+  "warmup_s": 300,
+  "episode_s": 3600,
+  "min_green_s": 10,
+  "max_green_s": 60,
+  "yellow_s": 3,
+  "all_red_s": 1,
+  "use_prediction_features": true,
+  "prediction_horizons": [5, 10, 15],
+  "reward_weights": {
+    "queue": 1.0,
+    "waiting": 0.5,
+    "pressure": 0.4,
+    "throughput": 0.3,
+    "switch": 0.05,
+    "emission": 0.0
+  },
+  "train": {
+    "algorithm": "dqn",
+    "episodes": 200,
+    "seed": 42,
+    "learning_rate": 0.0005,
+    "gamma": 0.99,
+    "batch_size": 64,
+    "buffer_size": 50000,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "epsilon_decay_steps": 30000
+  }
+}

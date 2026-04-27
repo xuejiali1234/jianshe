@@ -7,7 +7,11 @@ const vClassColors = {
     pedestrian: '#ffeb3b',
     DEFAULT: '#ffffff'
 };
-const VEHICLE_ICON_URL = '/static/assets/vehicle_top_blue_marker.png';
+const VEHICLE_ICON_URLS = [
+    '/static/assets/vehicle_green_marker.png',
+    '/static/assets/vehicle_yellow_marker.png',
+    '/static/assets/vehicle_red_marker.png'
+];
 
 const I18N = {
     titleDefault: '城市交通数字孪生看板',
@@ -46,25 +50,38 @@ function getVehicleZoomScale() {
     if (!map || typeof map.getZoom !== 'function') return 1;
     const zoom = Number(map.getZoom());
     if (!Number.isFinite(zoom)) return 1;
-    return Math.max(0.55, Math.min(1.25, 1 + (zoom - 16) * 0.12));
+    return Math.max(0.32, Math.min(1.25, Math.pow(1.28, zoom - 16)));
+}
+
+function getMapRotationAngle() {
+    if (!map || typeof map.getRotation !== 'function') return 0;
+    const rotation = Number(map.getRotation());
+    return Number.isFinite(rotation) ? rotation : 0;
 }
 
 function getVehicleIconSize(vClass) {
     const scale = getVehicleZoomScale();
-    let base = { width: 10, height: 18 };
-    if (vClass === 'bus' || vClass === 'truck') base = { width: 12, height: 22 };
-    if (vClass === 'emergency') base = { width: 11, height: 20 };
-    if (vClass === 'motorcycle') base = { width: 7, height: 13 };
-    if (vClass === 'pedestrian') base = { width: 8, height: 8 };
+    if (vClass === 'pedestrian') return { width: 7, height: 7 };
+    const base = { width: 7, height: 13 };
     return {
-        width: Math.max(5, Math.round(base.width * scale)),
-        height: Math.max(8, Math.round(base.height * scale))
+        width: Math.max(3, Math.round(base.width * scale)),
+        height: Math.max(6, Math.round(base.height * scale))
     };
 }
 
 function normalizeVehicleAngle(angle) {
     const value = Number(angle);
-    return Number.isFinite(value) ? value : 0;
+    const vehicleAngle = Number.isFinite(value) ? value : 0;
+    return vehicleAngle + getMapRotationAngle();
+}
+
+function getStableVehicleIconUrl(vehicle) {
+    const key = String(vehicle && vehicle.id ? vehicle.id : '');
+    let hash = 0;
+    for (let i = 0; i < key.length; i += 1) {
+        hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
+    }
+    return VEHICLE_ICON_URLS[Math.abs(hash) % VEHICLE_ICON_URLS.length];
 }
 
 function renderVehicleMarkerContent(vehicle) {
@@ -80,9 +97,10 @@ function renderVehicleMarkerContent(vehicle) {
             </div>
         `;
     }
+    const iconUrl = getStableVehicleIconUrl(vehicle);
     return `
         <div class="vehicle-icon vehicle-car-icon" style="width:${size.width}px;height:${size.height}px;transform:translate(-50%, -50%) rotate(${angle}deg);transform-origin:50% 50%;pointer-events:none;filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));--vehicle-color:${color};">
-            <img src="${VEHICLE_ICON_URL}" alt="" draggable="false" style="display:block;width:${size.width}px;height:${size.height}px;object-fit:contain;user-select:none;pointer-events:none;" />
+            <img src="${iconUrl}" alt="" draggable="false" style="display:block;width:${size.width}px;height:${size.height}px;object-fit:contain;user-select:none;pointer-events:none;" />
         </div>
     `;
 }
@@ -366,6 +384,7 @@ let roadLanes = [];
 let roadPolylines = [];
 let vehicleMarkers = [];
 let tlMarkers = [];
+let signalStopbarPolylines = [];
 let incidentMarkers = {};
 let compareIncidentEdgeMarkers = {};
 let lastRadarData = [];
@@ -411,6 +430,27 @@ function getMonitorRoadStyle() {
         outlineColor: '#fff4b8',
         borderWeight: 4,
         zIndex: 100
+    };
+}
+
+function getSignalStopbarColor(stateChar) {
+    const char = String(stateChar || '').trim();
+    const lower = char.toLowerCase();
+    if (lower === 'g' || lower === 'o') return '#42ff75';
+    if (lower === 'y') return '#ffd84d';
+    if (lower === 'r') return '#ff4d4f';
+    return '#8ca0b4';
+}
+
+function getSignalStopbarStyle(stateChar) {
+    return {
+        strokeWeight: 6,
+        strokeColor: getSignalStopbarColor(stateChar),
+        strokeOpacity: 0.96,
+        isOutline: true,
+        outlineColor: 'rgba(5, 10, 18, 0.86)',
+        borderWeight: 2,
+        zIndex: 106
     };
 }
 
@@ -710,6 +750,20 @@ function renderCompareIncidentEdgeMarkers() {
             compareIncidentEdgeMarkers[edgeId].setPosition(center);
             compareIncidentEdgeMarkers[edgeId].setContent(content);
         }
+    });
+}
+
+function updateSignalStopbars() {
+    if (!signalStopbarPolylines.length) return;
+    const tlsStateById = new Map();
+    lastTlData.forEach(tl => {
+        if (tl && tl.id) tlsStateById.set(tl.id, String(tl.state || ''));
+    });
+    signalStopbarPolylines.forEach(polyline => {
+        const meta = polyline.getExtData() || {};
+        const state = tlsStateById.get(meta.tlsId) || '';
+        const stateChar = state.charAt(Number(meta.linkIndex));
+        polyline.setOptions(getSignalStopbarStyle(stateChar));
     });
 }
 
@@ -1254,6 +1308,7 @@ function updateMapVectors() {
         tlMarkers[i].setContent(renderSignalMarkerContent(tl));
         tlMarkers[i].setExtData(tl);
     }
+    updateSignalStopbars();
 
     const currentIncidentIds = new Set(lastIncidentsData.map(inc => inc.id));
     Object.keys(incidentMarkers).forEach(id => {
@@ -1461,6 +1516,11 @@ function loadNetworkToMap() {
                 return;
             }
 
+            roadPolylines.forEach(polyline => map.remove(polyline));
+            roadPolylines = [];
+            signalStopbarPolylines.forEach(polyline => map.remove(polyline));
+            signalStopbarPolylines = [];
+
             roadLanes = data.lanes || [];
             let sumLon = 0;
             let sumLat = 0;
@@ -1499,6 +1559,38 @@ function loadNetworkToMap() {
                     pointCount += 1;
                 });
             });
+
+            (data.signalStopbars || []).forEach(stopbar => {
+                if (!stopbar.shape || stopbar.shape.length < 2) return;
+                const path = stopbar.shape.map(point => new AMap.LngLat(point[0], point[1]));
+                const polyline = new AMap.Polyline({
+                    path,
+                    bubble: false,
+                    cursor: 'pointer',
+                    extData: stopbar,
+                    ...getSignalStopbarStyle('r')
+                });
+                polyline.on('click', event => {
+                    const meta = event.target.getExtData() || {};
+                    if (!infoWindow) return;
+                    const state = (lastTlData.find(tl => tl.id === meta.tlsId)?.state || '').charAt(Number(meta.linkIndex));
+                    const statusLabel = state ? state.toUpperCase() : '--';
+                    infoWindow.setContent(`
+                        <div style="color:#333; min-width:180px;">
+                            <b>停止线信号</b><br/>
+                            信号灯：${escapeHtml(meta.tlsId)}<br/>
+                            进口道：${escapeHtml(meta.edgeId)}<br/>
+                            车道：${escapeHtml(meta.laneId)}<br/>
+                            方向：${escapeHtml(meta.dir || '--')} / link ${escapeHtml(meta.linkIndex)}<br/>
+                            当前状态：${escapeHtml(statusLabel)}
+                        </div>
+                    `);
+                    infoWindow.open(map, event.lnglat);
+                });
+                map.add(polyline);
+                signalStopbarPolylines.push(polyline);
+            });
+            updateSignalStopbars();
 
             if (pointCount > 0) {
                 map.setCenter([sumLon / pointCount, sumLat / pointCount]);
@@ -1556,6 +1648,8 @@ connectWS();
 if (map) {
     map.on('complete', () => loadNetworkToMap());
     map.on('zoomend', () => updateMapVectors());
+    map.on('rotateend', () => updateMapVectors());
+    map.on('pitchend', () => updateMapVectors());
 } else {
     fetchPredictionConfig();
     fetchScenarioRuns();

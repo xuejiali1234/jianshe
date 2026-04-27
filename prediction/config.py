@@ -66,6 +66,9 @@ class PredictionConfig:
     simulation_start_iso: str = "2026-04-17T08:00:00"
     base_demand_factor: float = 0.25
     sumo_net_file: str = "data/processed/czq_tls_webster.net.xml"
+    active_model_from_registry: bool = True
+    preferred_model: str = "transformer_v2"
+    fallback_model: str = "ha_baseline"
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "PredictionConfig":
@@ -100,6 +103,9 @@ class PredictionConfig:
             "simulation_start_iso": self.simulation_start_iso,
             "base_demand_factor": self.base_demand_factor,
             "sumo_net_file": self.sumo_net_file,
+            "active_model_from_registry": self.active_model_from_registry,
+            "preferred_model": self.preferred_model,
+            "fallback_model": self.fallback_model,
             "demand_regime": f"baseline_x{self.base_demand_factor:.2f}",
             "control_features_enabled": True,
             "per_edge_input_features": DEFAULT_PER_EDGE_INPUT_FEATURES,
