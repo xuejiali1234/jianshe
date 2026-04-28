@@ -1,5 +1,3 @@
-"""Single-intersection RL signal control scaffold."""
+"""Single-intersection RL signal control package."""
 
-from .env import SignalControlEnv
-
-__all__ = ["SignalControlEnv"]
+__all__: list[str] = []

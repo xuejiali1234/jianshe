@@ -721,8 +721,19 @@ def plot_control_feature_ablation(csv_path: str | Path, output_path: Path) -> No
 def run_smoke_test(
     config_path: str | Path = "configs/prediction_config.json",
     dataset_dir: str | Path = "data/datasets/p4_movement_control",
+    artifact_dir: str | Path | None = None,
+    report_dir: str | Path | None = None,
+    csv_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    service = PredictionService(load_prediction_config(config_path))
+    metrics_path = Path(report_dir) / "metrics.csv" if report_dir else None
+    service = PredictionService(
+        load_prediction_config(config_path),
+        artifact_dir=artifact_dir,
+        metrics_path=metrics_path,
+        batch_csv_path=csv_path,
+        manifest_path=manifest_path,
+    )
     dataset = DatasetBundle.load(dataset_dir)
     idx = int(dataset.test_idx[0])
     window = []
@@ -767,6 +778,12 @@ def main() -> None:
     parser.add_argument("--dataset-dir", default="data/datasets/p4_movement_control")
     parser.add_argument("--artifact-dir", default="models/artifacts")
     parser.add_argument("--report-dir", default="reports")
+    parser.add_argument("--scenario-manifest", default=None)
+    parser.add_argument(
+        "--update-config",
+        action="store_true",
+        help="After successful training, point prediction_config.json to this CSV/artifact/report set.",
+    )
     parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument(
         "--skip-ablation",
@@ -784,8 +801,53 @@ def main() -> None:
         train_ablation=not args.skip_ablation,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.update_config:
+        update_prediction_config_paths(
+            args.config,
+            args.csv,
+            args.artifact_dir,
+            args.report_dir,
+            args.scenario_manifest,
+        )
     if args.smoke_test:
-        print(json.dumps(run_smoke_test(args.config, args.dataset_dir), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                run_smoke_test(
+                    args.config,
+                    args.dataset_dir,
+                    args.artifact_dir,
+                    args.report_dir,
+                    args.csv,
+                    args.scenario_manifest,
+                ),
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+
+def update_prediction_config_paths(
+    config_path: str | Path,
+    csv_path: str | Path,
+    artifact_dir: str | Path,
+    report_dir: str | Path,
+    manifest_path: str | Path | None = None,
+) -> None:
+    path = Path(config_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["batch_csv_file"] = _as_posix(csv_path)
+    payload["artifact_dir"] = _as_posix(artifact_dir)
+    payload["metrics_file"] = _as_posix(Path(report_dir) / "metrics.csv")
+    if manifest_path:
+        payload["scenario_manifest_file"] = _as_posix(manifest_path)
+    payload["active_model_from_registry"] = True
+    payload["preferred_model"] = "transformer_v2"
+    payload["fallback_model"] = "ha_baseline"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _as_posix(path_value: str | Path) -> str:
+    return Path(path_value).as_posix()
 
 
 if __name__ == "__main__":

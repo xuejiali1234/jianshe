@@ -32,6 +32,17 @@ class PhaseStateBuilder:
             for phase_id in _phase_ids(movement):
                 if phase_id >= 0:
                     self.phase_to_movements[phase_id].append(movement)
+        self.feature_names = self._build_feature_names()
+        self.observation_size = len(self.feature_names)
+
+    def restrict_legal_green_phases(self, allowed_phase_ids: set[int]) -> None:
+        self.legal_green_phases = [
+            int(phase_id)
+            for phase_id in self.legal_green_phases
+            if int(phase_id) in allowed_phase_ids
+        ]
+        self.feature_names = self._build_feature_names()
+        self.observation_size = len(self.feature_names)
 
     def build(
         self,
@@ -42,8 +53,8 @@ class PhaseStateBuilder:
         prediction_phase_payload: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         phase_stats = []
-        prediction_available = bool(prediction_phase_payload)
         prediction_by_phase = _prediction_by_phase(prediction_phase_payload, self.target_tls_id)
+        prediction_available = bool(prediction_by_phase)
         for phase_id in self.legal_green_phases:
             movements = self.phase_to_movements.get(phase_id, [])
             edges = sorted({str(movement.get("incoming_edge", "")) for movement in movements if movement.get("incoming_edge")})
@@ -92,6 +103,27 @@ class PhaseStateBuilder:
             "phase_stats": phase_stats,
         }
         return np.asarray(vector, dtype=np.float32), info
+
+    def _build_feature_names(self) -> list[str]:
+        names = [f"phase_{phase_id}_active" for phase_id in self.legal_green_phases]
+        names.extend(["phase_elapsed_ratio", "prediction_available"])
+        for phase_id in self.legal_green_phases:
+            names.extend(
+                [
+                    f"phase_{phase_id}_queue_sum",
+                    f"phase_{phase_id}_arrival_flow_sum",
+                    f"phase_{phase_id}_discharge_flow_sum",
+                    f"phase_{phase_id}_mean_speed_mean",
+                ]
+            )
+            for horizon in self.prediction_horizons:
+                names.extend(
+                    [
+                        f"phase_{phase_id}_pred_arrival_h{horizon}",
+                        f"phase_{phase_id}_pred_queue_h{horizon}",
+                    ]
+                )
+        return names
 
 
 def _phase_ids(movement: dict[str, Any]) -> list[int]:
@@ -145,10 +177,11 @@ def _prediction_by_phase(payload: dict[str, Any] | None, target_tls_id: str) -> 
 
 def _prediction_features(phase_payload: dict[str, Any], horizons: list[int]) -> dict[str, dict[str, float]]:
     summary = phase_payload.get("horizon_summary", {}) if phase_payload else {}
-    return {
-        f"h{horizon}": {
-            "arrival_pressure": float(summary.get(f"h{horizon}", {}).get("arrival_sum", 0.0)),
-            "queue_pressure": float(summary.get(f"h{horizon}", {}).get("queue_sum", 0.0)),
+    result = {}
+    for horizon in horizons:
+        bucket = summary.get(f"h{horizon}", {})
+        result[f"h{horizon}"] = {
+            "arrival_pressure": float(bucket.get("arrival_sum", 0.0)),
+            "queue_pressure": float(bucket.get("queue_sum", bucket.get("queue_mean", 0.0))),
         }
-        for horizon in horizons
-    }
+    return result

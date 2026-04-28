@@ -11,6 +11,7 @@
   "episode_s": 3600,
   "min_green_s": 10,
   "max_green_s": 60,
+  "min_action_green_duration_s": 5,
   "yellow_s": 3,
   "all_red_s": 1,
   "use_prediction_features": true,
@@ -33,6 +34,14 @@
     "buffer_size": 50000,
     "epsilon_start": 1.0,
     "epsilon_end": 0.05,
-    "epsilon_decay_steps": 30000
+    "epsilon_decay_steps": 30000,
+    "sb3": {
+      "policy": "MlpPolicy",
+      "learning_starts": 1000,
+      "target_update_interval": 500,
+      "exploration_fraction": 0.3,
+      "exploration_final_eps": 0.05,
+      "train_freq": 4
+    }
   }
 }
