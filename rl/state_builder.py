@@ -8,6 +8,12 @@ import numpy as np
 
 from sim.movement_tools import load_movement_config
 
+QUEUE_SCALE = 20.0
+ARRIVAL_SCALE = 20.0
+DISCHARGE_SCALE = 20.0
+SPEED_SCALE = 15.0
+FEATURE_CLIP = 3.0
+
 
 class PhaseStateBuilder:
     def __init__(self, movement_config_path: str | Path, target_tls_id: str, prediction_horizons: list[int]):
@@ -19,7 +25,7 @@ class PhaseStateBuilder:
             for movement in payload.get("movements", [])
             if str(movement.get("tls_id", "")) == self.target_tls_id
         ]
-        self.legal_green_phases = sorted(
+        self.base_legal_green_phases = sorted(
             {
                 int(phase_id)
                 for movement in self.movements
@@ -27,6 +33,7 @@ class PhaseStateBuilder:
                 if int(phase_id) >= 0
             }
         )
+        self.legal_green_phases = list(self.base_legal_green_phases)
         self.phase_to_movements: dict[int, list[dict[str, Any]]] = defaultdict(list)
         for movement in self.movements:
             for phase_id in _phase_ids(movement):
@@ -38,7 +45,7 @@ class PhaseStateBuilder:
     def restrict_legal_green_phases(self, allowed_phase_ids: set[int]) -> None:
         self.legal_green_phases = [
             int(phase_id)
-            for phase_id in self.legal_green_phases
+            for phase_id in self.base_legal_green_phases
             if int(phase_id) in allowed_phase_ids
         ]
         self.feature_names = self._build_feature_names()
@@ -79,18 +86,24 @@ class PhaseStateBuilder:
         for row in phase_stats:
             vector.extend(
                 [
-                    row["queue_sum"],
-                    row["arrival_flow_sum"],
-                    row["discharge_flow_sum"],
-                    row["mean_speed_mean"],
+                    _normalize_positive(row["queue_sum"], QUEUE_SCALE),
+                    _normalize_positive(row["arrival_flow_sum"], ARRIVAL_SCALE),
+                    _normalize_positive(row["discharge_flow_sum"], DISCHARGE_SCALE),
+                    _normalize_positive(row["mean_speed_mean"], SPEED_SCALE, clip_value=2.0),
                 ]
             )
             for horizon in self.prediction_horizons:
                 horizon_key = f"h{horizon}"
                 vector.extend(
                     [
-                        row["predicted"].get(horizon_key, {}).get("arrival_pressure", 0.0),
-                        row["predicted"].get(horizon_key, {}).get("queue_pressure", 0.0),
+                        _normalize_positive(
+                            row["predicted"].get(horizon_key, {}).get("arrival_per_step", 0.0),
+                            ARRIVAL_SCALE,
+                        ),
+                        _normalize_positive(
+                            row["predicted"].get(horizon_key, {}).get("queue_mean", 0.0),
+                            QUEUE_SCALE,
+                        ),
                     ]
                 )
 
@@ -119,8 +132,8 @@ class PhaseStateBuilder:
             for horizon in self.prediction_horizons:
                 names.extend(
                     [
-                        f"phase_{phase_id}_pred_arrival_h{horizon}",
-                        f"phase_{phase_id}_pred_queue_h{horizon}",
+                        f"phase_{phase_id}_pred_arrival_per_step_h{horizon}",
+                        f"phase_{phase_id}_pred_queue_mean_h{horizon}",
                     ]
                 )
         return names
@@ -180,8 +193,17 @@ def _prediction_features(phase_payload: dict[str, Any], horizons: list[int]) -> 
     result = {}
     for horizon in horizons:
         bucket = summary.get(f"h{horizon}", {})
+        arrival_sum = float(bucket.get("arrival_sum", 0.0) or 0.0)
+        queue_mean = float(
+            bucket.get("queue_mean", bucket.get("queue_sum", 0.0) or 0.0) or 0.0
+        )
         result[f"h{horizon}"] = {
-            "arrival_pressure": float(bucket.get("arrival_sum", 0.0)),
-            "queue_pressure": float(bucket.get("queue_sum", bucket.get("queue_mean", 0.0))),
+            "arrival_per_step": arrival_sum / max(int(horizon), 1),
+            "queue_mean": queue_mean,
         }
     return result
+
+
+def _normalize_positive(value: float, scale: float, clip_value: float = FEATURE_CLIP) -> float:
+    safe_scale = max(float(scale), 1e-6)
+    return float(min(max(float(value), 0.0) / safe_scale, clip_value))

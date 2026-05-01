@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -25,6 +26,7 @@ from .dataset import (
     scale_X,
     scale_y,
 )
+from .graph_utils import load_movement_adjacency, load_movement_attention_bias
 from .metrics import append_metrics_csv, regression_metrics
 from .schemas import PredictRequest
 from .service import PredictionService
@@ -32,6 +34,29 @@ from .torch_models import LSTMForecaster, SpatioTemporalTransformerForecaster, T
 
 
 NOTE = "P4 movement-level control-feature closed-loop pipeline"
+V2_VARIANTS = {
+    "phase_embed_only": {
+        "phase_embedding": True,
+        "graph_bias": False,
+        "queue_weight": False,
+        "control_feature_scheme": "phase_embed_graph_v1",
+        "graph_bias_scale": 0.0,
+    },
+    "graph_bias_only": {
+        "phase_embedding": False,
+        "graph_bias": True,
+        "queue_weight": False,
+        "control_feature_scheme": "phase_state_v1",
+        "graph_bias_scale": 0.15,
+    },
+    "queue_weight_only": {
+        "phase_embedding": False,
+        "graph_bias": False,
+        "queue_weight": True,
+        "control_feature_scheme": "phase_state_v1",
+        "graph_bias_scale": 0.0,
+    },
+}
 ARTIFACT_FILES = [
     "xgboost_model.joblib",
     "lstm_model.pt",
@@ -56,8 +81,11 @@ def train_all(
     artifact_dir: str | Path = "models/artifacts",
     report_dir: str | Path = "reports",
     train_ablation: bool = True,
+    control_feature_scheme: str | None = None,
 ) -> dict[str, Any]:
     config = load_prediction_config(config_path)
+    if control_feature_scheme:
+        config.control_feature_scheme = control_feature_scheme
     dataset = build_dataset_from_csv(csv_path, config, include_control_features=True)
     ablation_dataset = (
         build_dataset_from_csv(csv_path, config, include_control_features=False)
@@ -81,13 +109,19 @@ def train_all(
         ablation_artifact_root.mkdir(parents=True, exist_ok=True)
     (report_root / "figures").mkdir(parents=True, exist_ok=True)
 
-    metrics_rows, predictions = train_model_suite(dataset, config.device, artifact_root)
+    metrics_rows, predictions = train_model_suite(
+        dataset,
+        config.device,
+        artifact_root,
+        report_root / "figures",
+    )
     ablation_rows: list[dict[str, Any]] = []
     if ablation_dataset is not None:
         ablation_rows, _ = train_model_suite(
             ablation_dataset,
             config.device,
             ablation_artifact_root,
+            report_root / "figures" / "no_control",
         )
 
     append_metrics_csv(report_root / "metrics.csv", metrics_rows)
@@ -111,6 +145,11 @@ def train_all(
         dataset,
         report_root / "figures" / "prediction_comparison_overall.png",
     )
+    plot_continuous_high_flow_series(
+        dataset,
+        predictions,
+        report_root / "figures" / "prediction_comparison_continuous_high_flow.png",
+    )
     plot_incident_vs_normal(
         dataset,
         predictions,
@@ -126,6 +165,11 @@ def train_all(
             report_root / "control_feature_ablation.csv",
             report_root / "figures" / "control_feature_ablation.png",
         )
+    write_feature_diagnostics_csv(
+        dataset,
+        predictions,
+        report_root / "phase_state_target_turn_diagnostics.csv",
+    )
 
     summary = {
         "status": "ok",
@@ -152,11 +196,13 @@ def train_all(
         ),
         "base_demand_factor": config.base_demand_factor,
         "control_features_enabled": True,
+        "control_feature_scheme": dataset.control_feature_scheme,
         "best_model": best["model"] if best else "ha_baseline",
         "metrics_path": str(report_root / "metrics.csv"),
         "control_ablation_path": str(report_root / "control_feature_ablation.csv")
         if ablation_dataset is not None
         else "",
+        "diagnostics_path": str(report_root / "phase_state_target_turn_diagnostics.csv"),
     }
     (report_root / "p4_training_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -169,10 +215,12 @@ def train_model_suite(
     dataset: DatasetBundle,
     device: str,
     artifact_root: Path,
+    loss_history_dir: Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, np.ndarray]]:
     artifact_root.mkdir(parents=True, exist_ok=True)
     metrics_rows: list[dict[str, Any]] = []
     predictions: dict[str, np.ndarray] = {}
+    loss_histories: dict[str, list[dict[str, Any]]] = {}
 
     test_idx = dataset.test_idx
     y_true_test = dataset.y[test_idx]
@@ -190,20 +238,29 @@ def train_model_suite(
         metrics_rows.append(error_row("xgboost", str(exc)))
 
     try:
-        lstm_pred = train_torch_model("lstm", dataset, device, artifact_root)
+        lstm_pred, lstm_history = train_torch_model(
+            "lstm",
+            dataset,
+            device,
+            artifact_root,
+            loss_history_dir=loss_history_dir,
+        )
         predictions["lstm"] = lstm_pred
+        loss_histories["lstm"] = lstm_history
         metrics_rows.extend(rows_for_subsets("lstm", dataset, test_idx, y_true_test, lstm_pred, subset_masks))
     except Exception as exc:
         metrics_rows.append(error_row("lstm", str(exc)))
 
     try:
-        transformer_pred = train_torch_model(
+        transformer_pred, transformer_history = train_torch_model(
             "transformer_v1",
             dataset,
             device,
             artifact_root,
+            loss_history_dir=loss_history_dir,
         )
         predictions["transformer_v1"] = transformer_pred
+        loss_histories["transformer_v1"] = transformer_history
         metrics_rows.extend(
             rows_for_subsets("transformer_v1", dataset, test_idx, y_true_test, transformer_pred, subset_masks)
         )
@@ -211,20 +268,122 @@ def train_model_suite(
         metrics_rows.append(error_row("transformer_v1", str(exc)))
 
     try:
-        transformer_v2_pred = train_torch_model(
+        transformer_v2_pred, transformer_v2_history = train_torch_model(
             "transformer_v2",
             dataset,
             device,
             artifact_root,
+            loss_history_dir=loss_history_dir,
         )
         predictions["transformer_v2"] = transformer_v2_pred
+        loss_histories["transformer_v2"] = transformer_v2_history
         metrics_rows.extend(
             rows_for_subsets("transformer_v2", dataset, test_idx, y_true_test, transformer_v2_pred, subset_masks)
         )
     except Exception as exc:
         metrics_rows.append(error_row("transformer_v2", str(exc)))
 
+    if loss_history_dir is not None and loss_histories:
+        plot_torch_training_loss_curves(
+            loss_histories,
+            loss_history_dir / "torch_training_loss_curves.png",
+        )
+
     return metrics_rows, predictions
+
+
+def train_v2_ablation_suite(
+    config_path: str | Path,
+    csv_path: str | Path,
+    dataset_root: str | Path,
+    artifact_root: str | Path,
+    report_root: str | Path,
+) -> dict[str, Any]:
+    root_dataset = Path(dataset_root)
+    root_artifact = Path(artifact_root)
+    root_report = Path(report_root)
+    root_dataset.mkdir(parents=True, exist_ok=True)
+    root_artifact.mkdir(parents=True, exist_ok=True)
+    root_report.mkdir(parents=True, exist_ok=True)
+
+    summary_rows: list[dict[str, Any]] = []
+    predictions_by_variant: dict[str, np.ndarray] = {}
+    datasets_by_variant: dict[str, DatasetBundle] = {}
+    for variant_name in ["phase_embed_only", "graph_bias_only", "queue_weight_only"]:
+        variant = V2_VARIANTS[variant_name]
+        config = load_prediction_config(config_path)
+        config.control_feature_scheme = str(variant["control_feature_scheme"])
+        dataset = build_dataset_from_csv(csv_path, config, include_control_features=True)
+        dataset_dir = root_dataset / variant_name
+        artifact_dir = root_artifact / variant_name
+        dataset.save(dataset_dir)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        pred, _history = train_torch_model(
+            "transformer_v2",
+            dataset,
+            config.device,
+            artifact_dir,
+            v2_variant_name=variant_name,
+            v2_variant=variant,
+            loss_history_dir=root_report / "figures" / variant_name,
+        )
+        predictions_by_variant[variant_name] = pred
+        datasets_by_variant[variant_name] = dataset
+        rows = rows_for_subsets(
+            f"transformer_v2_{variant_name}",
+            dataset,
+            dataset.test_idx,
+            dataset.y[dataset.test_idx],
+            pred,
+            build_subset_masks(dataset, dataset.test_idx),
+        )
+        summary_rows.extend([{**row, "variant": variant_name} for row in rows])
+
+    write_v2_ablation_summary(root_report / "v2_ablation_summary.csv", summary_rows)
+    best_variant = select_best_v2_variant(summary_rows)
+    stable_rows: list[dict[str, Any]] = []
+    if best_variant:
+        stable_variant = dict(V2_VARIANTS[best_variant])
+        config = load_prediction_config(config_path)
+        config.control_feature_scheme = str(stable_variant["control_feature_scheme"])
+        dataset = build_dataset_from_csv(csv_path, config, include_control_features=True)
+        dataset.save(root_dataset / "v2_stable_selected")
+        artifact_dir = root_artifact / "v2_stable_selected"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        pred, _history = train_torch_model(
+            "transformer_v2",
+            dataset,
+            config.device,
+            artifact_dir,
+            v2_variant_name="v2_stable_selected",
+            v2_variant=stable_variant,
+            loss_history_dir=root_report / "figures" / "v2_stable_selected",
+        )
+        stable_rows = rows_for_subsets(
+            "transformer_v2_v2_stable_selected",
+            dataset,
+            dataset.test_idx,
+            dataset.y[dataset.test_idx],
+            pred,
+            build_subset_masks(dataset, dataset.test_idx),
+        )
+        write_v2_ablation_summary(
+            root_report / "v2_stable_selected_metrics.csv",
+            [{**row, "variant": "v2_stable_selected"} for row in stable_rows],
+        )
+
+    summary = {
+        "status": "ok",
+        "variants": list(V2_VARIANTS.keys()),
+        "best_variant": best_variant or "",
+        "summary_path": str(root_report / "v2_ablation_summary.csv"),
+        "stable_metrics_path": str(root_report / "v2_stable_selected_metrics.csv") if stable_rows else "",
+    }
+    (root_report / "v2_ablation_run_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return summary
 
 
 def annotate_feature_set(row: dict[str, Any], feature_set: str) -> dict[str, Any]:
@@ -362,7 +521,10 @@ def train_torch_model(
     dataset: DatasetBundle,
     device: str,
     artifact_root: Path,
-) -> np.ndarray:
+    v2_variant_name: str | None = None,
+    v2_variant: dict[str, Any] | None = None,
+    loss_history_dir: Path | None = None,
+) -> tuple[np.ndarray, list[dict[str, Any]]]:
     import torch
     from torch import nn
     from torch.utils.data import DataLoader, TensorDataset
@@ -377,6 +539,14 @@ def train_torch_model(
     input_size = dataset.X.shape[-1]
     output_size = dataset.y.shape[-1]
     horizon_steps = dataset.y.shape[1]
+    graph_path: Path | None = None
+    optimizer_config = {
+        "lr": 1e-3,
+        "weight_decay": 1e-4,
+        "max_epochs": int(os.environ.get("TRAFFIC_TRAIN_EPOCHS", "12")),
+        "patience": int(os.environ.get("TRAFFIC_TRAIN_PATIENCE", "4")),
+        "grad_clip": None,
+    }
     if kind == "lstm":
         model_config = {
             "input_size": input_size,
@@ -399,21 +569,52 @@ def train_torch_model(
         }
         model = TransformerForecaster(**model_config)
     elif kind == "transformer_v2":
-        time_feature_size = 2 if dataset.feature_names[-2:] == ["tod_sin", "tod_cos"] else 0
+        v2_variant = v2_variant or default_v2_variant(dataset.control_feature_scheme)
+        time_feature_size, entity_input_size = infer_v2_feature_layout(dataset)
+        graph_path = resolve_movement_graph_path()
+        phase_id_feature_index = feature_index_in_entity(dataset, "phase_id_embed") if v2_variant.get("phase_embedding") else None
+        signal_state_feature_index = feature_index_in_entity(dataset, "signal_state_embed") if v2_variant.get("phase_embedding") else None
+        max_phase_id = max_embedding_value(dataset, phase_id_feature_index)
+        max_signal_state_id = max_embedding_value(dataset, signal_state_feature_index)
+        graph_adjacency = None
+        graph_attention_bias = None
+        if graph_path is not None:
+            if v2_variant.get("graph_bias"):
+                graph_attention_bias = load_movement_attention_bias(
+                    graph_path,
+                    dataset.edge_ids,
+                    scale=float(v2_variant.get("graph_bias_scale", 0.15)),
+                )
+            else:
+                graph_adjacency = load_movement_adjacency(graph_path, dataset.edge_ids)
         model_config = {
             "input_size": input_size,
             "output_size": output_size,
             "horizon_steps": horizon_steps,
             "num_entities": len(dataset.edge_ids),
+            "entity_input_size": entity_input_size,
             "target_size": len(dataset.targets),
             "time_feature_size": time_feature_size,
-            "d_model": 96,
+            "d_model": 128,
             "n_heads": 4,
             "temporal_layers": 2,
-            "spatial_layers": 2,
-            "dropout": 0.1,
+            "spatial_layers": 2 if dataset.control_feature_scheme == "phase_embed_graph_v1" else 1,
+            "dropout": 0.05,
+            "graph_adjacency": graph_adjacency,
+            "graph_attention_bias": graph_attention_bias,
+            "phase_id_feature_index": phase_id_feature_index,
+            "max_phase_id": max_phase_id,
+            "signal_state_feature_index": signal_state_feature_index,
+            "max_signal_state_id": max_signal_state_id,
         }
         model = SpatioTemporalTransformerForecaster(**model_config)
+        optimizer_config = {
+            "lr": float(os.environ.get("TRAFFIC_TRAIN_LR_V2", "3e-4")),
+            "weight_decay": float(os.environ.get("TRAFFIC_TRAIN_WD_V2", "5e-5")),
+            "max_epochs": int(os.environ.get("TRAFFIC_TRAIN_EPOCHS_V2", "40")),
+            "patience": int(os.environ.get("TRAFFIC_TRAIN_PATIENCE_V2", "8")),
+            "grad_clip": float(os.environ.get("TRAFFIC_TRAIN_GRAD_CLIP_V2", "1.0")),
+        }
     else:
         raise ValueError(f"Unknown torch model kind: {kind}")
 
@@ -421,33 +622,74 @@ def train_torch_model(
     train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
     train_loader = DataLoader(train_ds, batch_size=min(64, len(train_ds)), shuffle=True)
     criterion = nn.HuberLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    target_weights = (
+        build_output_target_weights(dataset, device)
+        if kind == "transformer_v2" and v2_variant and v2_variant.get("queue_weight")
+        else None
+    )
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=optimizer_config["lr"],
+        weight_decay=optimizer_config["weight_decay"],
+    )
     best_state = None
     best_val = math.inf
-    patience = int(os.environ.get("TRAFFIC_TRAIN_PATIENCE", "4"))
+    patience = optimizer_config["patience"]
     stale_epochs = 0
-    max_epochs = int(os.environ.get("TRAFFIC_TRAIN_EPOCHS", "12"))
+    max_epochs = optimizer_config["max_epochs"]
+    loss_history: list[dict[str, Any]] = []
+    best_epoch = 0
 
-    for _ in range(max_epochs):
+    for epoch in range(1, max_epochs + 1):
         model.train()
+        train_loss_sum = 0.0
+        train_sample_count = 0
         for xb, yb in train_loader:
             xb = xb.to(device)
             yb = yb.to(device)
             optimizer.zero_grad(set_to_none=True)
-            loss = criterion(model(xb), yb)
+            pred = model(xb)
+            loss = weighted_huber_loss(pred, yb, target_weights) if target_weights is not None else criterion(pred, yb)
             loss.backward()
+            if optimizer_config["grad_clip"] is not None:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    max_norm=float(optimizer_config["grad_clip"]),
+                )
             optimizer.step()
+            batch_size = int(xb.shape[0])
+            train_loss_sum += float(loss.item()) * batch_size
+            train_sample_count += batch_size
 
         model.eval()
         with torch.no_grad():
             val_pred = model(torch.from_numpy(X_val).to(device))
-            val_loss = float(criterion(val_pred, torch.from_numpy(y_val).to(device)).item())
+            y_val_tensor = torch.from_numpy(y_val).to(device)
+            val_loss_tensor = (
+                weighted_huber_loss(val_pred, y_val_tensor, target_weights)
+                if target_weights is not None
+                else criterion(val_pred, y_val_tensor)
+            )
+            val_loss = float(val_loss_tensor.item())
+        train_loss = train_loss_sum / max(train_sample_count, 1)
+        is_best = val_loss < best_val
         if val_loss < best_val:
             best_val = val_loss
+            best_epoch = epoch
             best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
             stale_epochs = 0
         else:
             stale_epochs += 1
+        loss_history.append(
+            {
+                "epoch": int(epoch),
+                "train_loss": round(float(train_loss), 8),
+                "val_loss": round(float(val_loss), 8),
+                "best_val_loss": round(float(best_val), 8),
+                "is_best": bool(is_best),
+            }
+        )
+        if not is_best:
             if stale_epochs >= patience:
                 break
 
@@ -458,15 +700,186 @@ def train_torch_model(
         test_pred_scaled = model(torch.from_numpy(X_test).to(device)).detach().cpu().numpy()
     pred = inverse_scale_y(test_pred_scaled, dataset.y_mean, dataset.y_std)
 
+    artifact_model_config = sanitize_torch_model_config(
+        kind,
+        model_config,
+        graph_path=graph_path if kind == "transformer_v2" else None,
+        control_feature_scheme=dataset.control_feature_scheme,
+        v2_variant_name=v2_variant_name,
+        v2_variant=v2_variant,
+    )
+
     artifact = {
         "kind": kind,
         "model_name": kind,
-        "model_config": model_config,
+        "model_config": artifact_model_config,
         "state_dict": model.state_dict(),
+        "loss_history": loss_history,
+        "best_epoch": int(best_epoch),
+        "best_val_loss": float(best_val),
+        "epochs_trained": int(len(loss_history)),
         **dataset.metadata_for_artifact(),
     }
     torch.save(artifact, artifact_root / f"{kind}_model.pt")
-    return pred
+    if loss_history_dir is not None:
+        write_loss_history_csv(
+            loss_history,
+            loss_history_dir / f"{kind}_loss_history.csv",
+            kind,
+        )
+        plot_single_training_loss_curve(
+            loss_history,
+            loss_history_dir / f"{kind}_training_loss.png",
+            kind,
+        )
+    return pred, loss_history
+
+
+def infer_v2_feature_layout(dataset: DatasetBundle) -> tuple[int, int]:
+    time_feature_names = ["tod_sin", "tod_cos"]
+    time_feature_size = 2 if dataset.feature_names[-2:] == time_feature_names else 0
+    if time_feature_size != 2:
+        raise ValueError(
+            "transformer_v2 requires feature_names to end with ['tod_sin', 'tod_cos']"
+        )
+
+    num_entities = len(dataset.edge_ids)
+    if num_entities <= 0:
+        raise ValueError("transformer_v2 requires at least one entity")
+
+    entity_body_size = len(dataset.feature_names) - time_feature_size
+    if entity_body_size <= 0 or entity_body_size % num_entities != 0:
+        raise ValueError(
+            f"Bad V2 feature layout: feature_names={len(dataset.feature_names)}, "
+            f"entities={num_entities}, time_feature_size={time_feature_size}"
+        )
+
+    entity_input_size = entity_body_size // num_entities
+    expected_total = entity_input_size * num_entities + time_feature_size
+    if expected_total != len(dataset.feature_names):
+        raise ValueError(
+            f"Bad V2 feature count: expected_total={expected_total}, "
+            f"feature_names={len(dataset.feature_names)}"
+        )
+
+    for entity_id in dataset.edge_ids[:3]:
+        prefix = f"{entity_id}__"
+        prefix_count = sum(1 for feature_name in dataset.feature_names if feature_name.startswith(prefix))
+        if prefix_count != entity_input_size:
+            raise ValueError(
+                f"Entity {entity_id} has {prefix_count} features, expected {entity_input_size}"
+            )
+
+    expected_features = list(dataset.per_movement_input_features or [])
+    if expected_features:
+        first_entity = dataset.edge_ids[0]
+        expected_feature_names = [f"{first_entity}__{feature}" for feature in expected_features]
+        actual_feature_names = [
+            feature_name
+            for feature_name in dataset.feature_names
+            if feature_name.startswith(f"{first_entity}__")
+        ]
+        if actual_feature_names != expected_feature_names:
+            raise ValueError(
+                "transformer_v2 feature order mismatch for first entity: "
+                f"expected {expected_feature_names}, got {actual_feature_names}"
+            )
+
+    if output_size := dataset.y.shape[-1]:
+        expected_output_size = num_entities * len(dataset.targets)
+        if output_size != expected_output_size:
+            raise ValueError(
+                f"Bad V2 output size: expected {expected_output_size}, got {output_size}"
+            )
+
+    return time_feature_size, entity_input_size
+
+
+def feature_index_in_entity(dataset: DatasetBundle, feature: str) -> int | None:
+    features = list(dataset.per_movement_input_features or [])
+    if feature not in features:
+        return None
+    return features.index(feature)
+
+
+def max_embedding_value(dataset: DatasetBundle, feature_index: int | None) -> int:
+    if feature_index is None:
+        return 0
+    entity_feature_size = len(dataset.per_movement_input_features or [])
+    if entity_feature_size <= 0:
+        return 0
+    columns = [
+        entity_index * entity_feature_size + feature_index
+        for entity_index in range(len(dataset.edge_ids))
+    ]
+    values = dataset.X[:, :, columns]
+    valid = values[values >= 0]
+    if valid.size == 0:
+        return 0
+    return max(0, int(np.nanmax(valid)))
+
+
+def build_output_target_weights(dataset: DatasetBundle, device: str):
+    import torch
+
+    weights = []
+    for _entity_id in dataset.edge_ids:
+        for target in dataset.targets:
+            weights.append(1.2 if target == "queue_veh" else 1.0)
+    return torch.tensor(weights, dtype=torch.float32, device=device).view(1, 1, -1)
+
+
+def weighted_huber_loss(pred, target, target_weights):
+    import torch.nn.functional as F
+
+    loss = F.smooth_l1_loss(pred, target, reduction="none")
+    return (loss * target_weights).mean()
+
+
+def default_v2_variant(control_feature_scheme: str) -> dict[str, Any]:
+    if control_feature_scheme == "phase_embed_graph_v1":
+        return {
+            "phase_embedding": True,
+            "graph_bias": True,
+            "queue_weight": True,
+            "control_feature_scheme": "phase_embed_graph_v1",
+            "graph_bias_scale": 1.0,
+        }
+    return {
+        "phase_embedding": False,
+        "graph_bias": False,
+        "queue_weight": False,
+        "control_feature_scheme": control_feature_scheme,
+        "graph_bias_scale": 0.0,
+    }
+
+
+def resolve_movement_graph_path() -> Path | None:
+    candidate = Path(load_prediction_config("configs/prediction_config.json").movement_graph_file)
+    return candidate if candidate.exists() else None
+
+
+def sanitize_torch_model_config(
+    kind: str,
+    model_config: dict[str, Any],
+    graph_path: Path | None = None,
+    control_feature_scheme: str = "phase_state_v1",
+    v2_variant_name: str | None = None,
+    v2_variant: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sanitized = dict(model_config)
+    sanitized.pop("graph_adjacency", None)
+    sanitized.pop("graph_attention_bias", None)
+    if kind == "transformer_v2":
+        sanitized["graph_enabled"] = graph_path is not None and bool(model_config.get("graph_adjacency") is not None)
+        sanitized["graph_bias_enabled"] = graph_path is not None and bool(model_config.get("graph_attention_bias") is not None)
+        sanitized["graph_bias_scale"] = float((v2_variant or {}).get("graph_bias_scale", 0.0))
+        sanitized["graph_path"] = str(graph_path) if graph_path is not None else ""
+        sanitized["control_feature_scheme"] = control_feature_scheme
+        sanitized["v2_experiment_variant"] = v2_variant_name or ""
+        sanitized["phase_embedding_enabled"] = bool((v2_variant or {}).get("phase_embedding", False))
+        sanitized["queue_weight_enabled"] = bool((v2_variant or {}).get("queue_weight", False))
+    return sanitized
 
 
 def flatten_scaled(dataset: DatasetBundle, indices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -562,6 +975,81 @@ def write_best_artifact(model_name: str, artifact_root: Path) -> None:
     )
 
 
+def write_loss_history_csv(
+    history: list[dict[str, Any]],
+    output_path: Path,
+    model_name: str,
+) -> None:
+    if not history:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["model", "epoch", "train_loss", "val_loss", "best_val_loss", "is_best"]
+    with output_path.open("w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in history:
+            writer.writerow({"model": model_name, **row})
+
+
+def plot_single_training_loss_curve(
+    history: list[dict[str, Any]],
+    output_path: Path,
+    model_name: str,
+) -> None:
+    if not history:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    epochs = [int(row["epoch"]) for row in history]
+    train_loss = [float(row["train_loss"]) for row in history]
+    val_loss = [float(row["val_loss"]) for row in history]
+    best_epochs = [int(row["epoch"]) for row in history if row.get("is_best")]
+    best_epoch = best_epochs[-1] if best_epochs else epochs[-1]
+
+    plt.figure(figsize=(8, 4.5))
+    plt.plot(epochs, train_loss, label="train loss", linewidth=2.0)
+    plt.plot(epochs, val_loss, label="val loss", linewidth=2.0)
+    plt.axvline(best_epoch, color="#d62728", linestyle="--", linewidth=1.2, label=f"best epoch {best_epoch}")
+    plt.title(f"{model_name} Training Loss")
+    plt.xlabel("epoch")
+    plt.ylabel("Huber loss")
+    plt.grid(True, alpha=0.25)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def plot_torch_training_loss_curves(
+    histories: dict[str, list[dict[str, Any]]],
+    output_path: Path,
+) -> None:
+    available = {name: rows for name, rows in histories.items() if rows}
+    if not available:
+        return
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(len(available), 1, figsize=(9, max(4, 3.0 * len(available))), sharex=False)
+    if len(available) == 1:
+        axes = [axes]
+    for ax, (model_name, history) in zip(axes, available.items()):
+        epochs = [int(row["epoch"]) for row in history]
+        train_loss = [float(row["train_loss"]) for row in history]
+        val_loss = [float(row["val_loss"]) for row in history]
+        best_epochs = [int(row["epoch"]) for row in history if row.get("is_best")]
+        best_epoch = best_epochs[-1] if best_epochs else epochs[-1]
+        ax.plot(epochs, train_loss, label="train", linewidth=1.8)
+        ax.plot(epochs, val_loss, label="val", linewidth=1.8)
+        ax.axvline(best_epoch, color="#d62728", linestyle="--", linewidth=1.0)
+        ax.set_title(model_name)
+        ax.set_xlabel("epoch")
+        ax.set_ylabel("Huber loss")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+    fig.suptitle("Torch Model Training Loss Curves", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+
+
 def plot_prediction_comparison(
     y_true: np.ndarray,
     predictions: dict[str, np.ndarray],
@@ -570,14 +1058,153 @@ def plot_prediction_comparison(
 ) -> None:
     if y_true.size == 0 or not predictions:
         return
-    feature_idx = 0
+
+    target_size = len(dataset.targets)
+    try:
+        arrival_offset = dataset.targets.index("arrival_flow")
+    except ValueError:
+        arrival_offset = 0
+
+    incoming_to_cols: dict[str, list[int]] = {}
+    incoming_to_tls: dict[str, str] = {}
+    for entity_index, entity_id in enumerate(dataset.edge_ids):
+        meta = (dataset.entity_metadata or {}).get(entity_id, {})
+        incoming_edge = str(meta.get("incoming_edge") or entity_id)
+        incoming_to_cols.setdefault(incoming_edge, []).append(entity_index * target_size + arrival_offset)
+        incoming_to_tls.setdefault(incoming_edge, str(meta.get("tls_id") or "unknown"))
+
+    if not incoming_to_cols:
+        feature_idx = 0
+        plt.figure(figsize=(9, 5))
+        plt.plot(y_true[0, :, feature_idx], label="true", linewidth=2)
+        for name, pred in predictions.items():
+            plt.plot(pred[0, :, feature_idx], label=name, linestyle="--")
+        plt.title(f"Forecast Comparison: {dataset.target_feature_names[feature_idx]}")
+        plt.xlabel("horizon step")
+        plt.ylabel("value")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close()
+        return
+
+    best_sample_pos = 0
+    best_incoming_edge = next(iter(incoming_to_cols))
+    best_score = -1.0
+    for sample_pos in range(y_true.shape[0]):
+        for incoming_edge, cols in incoming_to_cols.items():
+            score = float(y_true[sample_pos, :, cols].sum())
+            if score > best_score:
+                best_score = score
+                best_sample_pos = sample_pos
+                best_incoming_edge = incoming_edge
+
+    selected_cols = incoming_to_cols[best_incoming_edge]
+    tls_id = incoming_to_tls.get(best_incoming_edge, "unknown")
+    movement_count = len(selected_cols)
+    y_true_series = y_true[best_sample_pos, :, selected_cols].sum(axis=1)
+
     plt.figure(figsize=(9, 5))
-    plt.plot(y_true[0, :, feature_idx], label="true", linewidth=2)
+    plt.plot(y_true_series, label="true", linewidth=2)
     for name, pred in predictions.items():
-        plt.plot(pred[0, :, feature_idx], label=name, linestyle="--")
-    plt.title(f"Forecast Comparison: {dataset.target_feature_names[feature_idx]}")
+        pred_series = pred[best_sample_pos, :, selected_cols].sum(axis=1)
+        plt.plot(pred_series, label=name, linestyle="--")
+    plt.title(
+        "Forecast Comparison: "
+        f"TLS {tls_id} / incoming {best_incoming_edge} / arrival_flow "
+        f"(sum of {movement_count} movements)"
+    )
     plt.xlabel("horizon step")
-    plt.ylabel("value")
+    plt.ylabel("arrival flow")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def plot_continuous_high_flow_series(
+    dataset: DatasetBundle,
+    predictions: dict[str, np.ndarray],
+    output_path: Path,
+    target_name: str = "arrival_flow",
+    horizon_offset: int = 0,
+) -> None:
+    if not predictions or len(dataset.test_idx) == 0:
+        return
+
+    target_size = len(dataset.targets)
+    try:
+        target_offset = dataset.targets.index(target_name)
+    except ValueError:
+        target_offset = 0
+
+    incoming_to_cols: dict[str, list[int]] = {}
+    incoming_to_tls: dict[str, str] = {}
+    for entity_index, entity_id in enumerate(dataset.edge_ids):
+        meta = (dataset.entity_metadata or {}).get(entity_id, {})
+        incoming_edge = str(meta.get("incoming_edge") or entity_id)
+        incoming_to_cols.setdefault(incoming_edge, []).append(entity_index * target_size + target_offset)
+        incoming_to_tls.setdefault(incoming_edge, str(meta.get("tls_id") or "unknown"))
+
+    y_true = dataset.y[dataset.test_idx]
+    run_ids = dataset.sample_run_ids[dataset.test_idx]
+    timestamps = dataset.sample_target_timestamps[dataset.test_idx]
+    steps = dataset.sample_target_steps[dataset.test_idx]
+
+    best_group: tuple[str, str] | None = None
+    best_score = -1.0
+    for run_id in dict.fromkeys(run_ids.tolist()):
+        run_mask = run_ids == run_id
+        if not np.any(run_mask):
+            continue
+        for incoming_edge, cols in incoming_to_cols.items():
+            score = float(y_true[run_mask, horizon_offset, :][:, cols].sum())
+            if score > best_score:
+                best_score = score
+                best_group = (str(run_id), incoming_edge)
+
+    if best_group is None:
+        return
+
+    selected_run_id, selected_incoming_edge = best_group
+    selected_cols = incoming_to_cols[selected_incoming_edge]
+    selected_tls = incoming_to_tls.get(selected_incoming_edge, "unknown")
+    group_mask = run_ids == selected_run_id
+    group_positions = np.flatnonzero(group_mask)
+    if group_positions.size == 0:
+        return
+    group_positions = group_positions[np.argsort(steps[group_positions])]
+
+    true_series = y_true[group_positions, horizon_offset, :][:, selected_cols].sum(axis=1)
+    series_by_model = {
+        name: pred[group_positions, horizon_offset, :][:, selected_cols].sum(axis=1)
+        for name, pred in predictions.items()
+    }
+
+    labels = []
+    for pos in group_positions:
+        raw_ts = str(timestamps[pos])
+        try:
+            labels.append(datetime.fromisoformat(raw_ts).strftime("%H:%M"))
+        except ValueError:
+            labels.append(raw_ts)
+
+    x = np.arange(len(group_positions))
+    plt.figure(figsize=(11, 5))
+    plt.plot(x, true_series, label="true", linewidth=2.2, color="#1f77b4")
+    for name, series in series_by_model.items():
+        plt.plot(x, series, label=name, linestyle="--", linewidth=1.8)
+
+    tick_step = max(1, len(x) // 10)
+    plt.xticks(x[::tick_step], labels[::tick_step], rotation=0)
+    plt.xlabel("time")
+    plt.ylabel(f"{target_name} per 60s")
+    plt.title(
+        "Continuous Rolling Forecast: "
+        f"TLS {selected_tls} / incoming {selected_incoming_edge} / {target_name} "
+        f"(1-step ahead, {len(selected_cols)} movements, run={selected_run_id})"
+    )
+    plt.grid(True, alpha=0.25)
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
@@ -680,6 +1307,45 @@ def write_control_ablation_csv(path: str | Path, rows: list[dict[str, Any]]) -> 
             writer.writerow({key: row.get(key, "") for key in fieldnames})
 
 
+def write_v2_ablation_summary(path: str | Path, rows: list[dict[str, Any]]) -> None:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "variant",
+        "model",
+        "split",
+        "subset",
+        "n_samples",
+        "run_count",
+        "mae",
+        "rmse",
+        "wape",
+        "mae_h5",
+        "mae_h10",
+        "mae_h15",
+        "note",
+    ]
+    with out.open("w", newline="", encoding="utf-8") as fp:
+        import csv
+
+        writer = csv.DictWriter(fp, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+
+
+def select_best_v2_variant(rows: list[dict[str, Any]]) -> str | None:
+    valid = [
+        row
+        for row in rows
+        if row.get("subset") == "overall" and isinstance(row.get("mae"), float)
+    ]
+    if not valid:
+        return None
+    best = min(valid, key=lambda row: float(row["mae"]))
+    return str(best.get("variant") or "")
+
+
 def plot_control_feature_ablation(csv_path: str | Path, output_path: Path) -> None:
     import csv
 
@@ -716,6 +1382,70 @@ def plot_control_feature_ablation(csv_path: str | Path, output_path: Path) -> No
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+
+
+def write_feature_diagnostics_csv(
+    dataset: DatasetBundle,
+    predictions: dict[str, np.ndarray],
+    output_path: Path,
+) -> None:
+    if not predictions:
+        return
+
+    import csv
+
+    y_true = dataset.y[dataset.test_idx]
+    rows: list[dict[str, Any]] = []
+    target_size = len(dataset.targets)
+    turn_type_to_indices: dict[str, list[int]] = {}
+    for entity_index, entity_id in enumerate(dataset.edge_ids):
+        turn_type = str((dataset.entity_metadata or {}).get(entity_id, {}).get("turn_type", "unknown") or "unknown")
+        turn_type_to_indices.setdefault(turn_type, []).append(entity_index)
+
+    for model_name, y_pred in predictions.items():
+        for target_index, target_name in enumerate(dataset.targets):
+            cols = np.arange(target_index, y_true.shape[2], target_size)
+            target_metrics = regression_metrics(y_true[:, :, cols], y_pred[:, :, cols])
+            rows.append(
+                {
+                    "group_type": "target",
+                    "group_name": target_name,
+                    "model": model_name,
+                    "mae": target_metrics.get("mae"),
+                    "rmse": target_metrics.get("rmse"),
+                    "wape": target_metrics.get("wape"),
+                    "n_entities": int(len(cols)),
+                }
+            )
+
+        for turn_type, entity_indices in sorted(turn_type_to_indices.items()):
+            if not entity_indices:
+                continue
+            cols: list[int] = []
+            for entity_index in entity_indices:
+                base = entity_index * target_size
+                cols.extend(range(base, base + target_size))
+            turn_metrics = regression_metrics(y_true[:, :, cols], y_pred[:, :, cols])
+            rows.append(
+                {
+                    "group_type": "turn_type",
+                    "group_name": turn_type,
+                    "model": model_name,
+                    "mae": turn_metrics.get("mae"),
+                    "rmse": turn_metrics.get("rmse"),
+                    "wape": turn_metrics.get("wape"),
+                    "n_entities": int(len(entity_indices)),
+                }
+            )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=["group_type", "group_name", "model", "mae", "rmse", "wape", "n_entities"],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def run_smoke_test(
@@ -780,6 +1510,12 @@ def main() -> None:
     parser.add_argument("--report-dir", default="reports")
     parser.add_argument("--scenario-manifest", default=None)
     parser.add_argument(
+        "--control-feature-scheme",
+        default=None,
+        choices=["phase_state_v1", "phase_embed_graph_v1"],
+        help="Override the prediction config control feature scheme for this training run.",
+    )
+    parser.add_argument(
         "--update-config",
         action="store_true",
         help="After successful training, point prediction_config.json to this CSV/artifact/report set.",
@@ -790,7 +1526,23 @@ def main() -> None:
         action="store_true",
         help="Skip the no-control-feature ablation run for faster V2 validation.",
     )
+    parser.add_argument(
+        "--v2-ablation",
+        action="store_true",
+        help="Run V2-only component ablations instead of the full model suite.",
+    )
     args = parser.parse_args()
+
+    if args.v2_ablation:
+        summary = train_v2_ablation_suite(
+            args.config,
+            args.csv,
+            args.dataset_dir,
+            args.artifact_dir,
+            args.report_dir,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
 
     summary = train_all(
         args.config,
@@ -799,6 +1551,7 @@ def main() -> None:
         args.artifact_dir,
         args.report_dir,
         train_ablation=not args.skip_ablation,
+        control_feature_scheme=args.control_feature_scheme,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.update_config:
@@ -808,6 +1561,7 @@ def main() -> None:
             args.artifact_dir,
             args.report_dir,
             args.scenario_manifest,
+            args.control_feature_scheme,
         )
     if args.smoke_test:
         print(
@@ -832,6 +1586,7 @@ def update_prediction_config_paths(
     artifact_dir: str | Path,
     report_dir: str | Path,
     manifest_path: str | Path | None = None,
+    control_feature_scheme: str | None = None,
 ) -> None:
     path = Path(config_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -840,6 +1595,8 @@ def update_prediction_config_paths(
     payload["metrics_file"] = _as_posix(Path(report_dir) / "metrics.csv")
     if manifest_path:
         payload["scenario_manifest_file"] = _as_posix(manifest_path)
+    if control_feature_scheme:
+        payload["control_feature_scheme"] = control_feature_scheme
     payload["active_model_from_registry"] = True
     payload["preferred_model"] = "transformer_v2"
     payload["fallback_model"] = "ha_baseline"

@@ -42,8 +42,8 @@ const modelNameMap = {
     ha_baseline: '历史平均基线',
     xgboost: 'XGBoost',
     lstm: 'LSTM',
-    transformer_v1: 'Transformer V1',
-    transformer_v2: 'Transformer V2'
+    transformer_v1: 'Transformer V1（稳定预测模型）',
+    transformer_v2: 'Transformer V2（探索模型）'
 };
 
 function getVehicleZoomScale() {

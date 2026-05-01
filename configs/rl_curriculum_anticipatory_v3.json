@@ -1,0 +1,16 @@
+{
+  "stage1_config": "configs/rl_signal_config_anticipatory_v3.json",
+  "stage2_config": "configs/rl_signal_config_anticipatory_v3_mixed.json",
+  "stage1_timesteps": 3000,
+  "stage2_timesteps": 7000,
+  "seed": 42,
+  "sim_end": 1800,
+  "use_prediction": true,
+  "use_prediction_reward": true,
+  "reward_mode": "anticipatory_delta_pressure_v2",
+  "out_dir": "models/artifacts_rl/anticipatory_v3_curriculum",
+  "report_dir": "reports/rl_signal_control/anticipatory_v3_curriculum",
+  "stage1_run_name": "dqn_pred_v1_anticipatory_v3_curriculum_stage1",
+  "stage2_run_name": "dqn_pred_v1_anticipatory_v3_curriculum_final",
+  "checkpoint_every": 1000
+}

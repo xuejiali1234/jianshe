@@ -31,7 +31,7 @@ CONTROL_FEATURE_DEFAULTS = {
     "green_remaining_s": 0.0,
 }
 CONTROL_FEATURE_COLUMNS = list(CONTROL_FEATURE_DEFAULTS.keys())
-MOVEMENT_INPUT_FEATURES = [
+BASE_MOVEMENT_INPUT_FEATURES = [
     "arrival_flow",
     "discharge_flow",
     "mean_speed",
@@ -39,8 +39,22 @@ MOVEMENT_INPUT_FEATURES = [
     "queue_veh",
     "queue_meter",
     INCIDENT_COLUMN,
-    *CONTROL_FEATURE_COLUMNS,
 ]
+PHASE_STATE_FEATURES = [
+    "is_green",
+    "is_red_or_yellow",
+    "phase_elapsed_s",
+    "green_remaining_s",
+]
+PHASE_EMBED_FEATURES = [
+    "phase_id_embed",
+    "signal_state_embed",
+    "phase_elapsed_s",
+    "green_remaining_s",
+]
+MOVEMENT_INPUT_FEATURES = [*BASE_MOVEMENT_INPUT_FEATURES, *PHASE_STATE_FEATURES]
+SIGNAL_STATE_TO_CODE = {"r": 0.0, "y": 1.0, "g": 2.0, "G": 3.0}
+DEFAULT_SIGNAL_STATE_CODE = 4.0
 
 
 @dataclass
@@ -65,8 +79,10 @@ class DatasetBundle:
     sample_incident_flags: np.ndarray
     sample_signal_variants: np.ndarray
     control_features_enabled: bool = True
+    control_feature_scheme: str = "phase_state_v1"
     observation_level: str = "edge"
     entity_metadata: dict[str, dict[str, Any]] | None = None
+    per_movement_input_features: list[str] | None = None
 
     def save(self, output_dir: str | Path) -> None:
         out = Path(output_dir)
@@ -96,8 +112,10 @@ class DatasetBundle:
             "entity_ids": self.edge_ids,
             "targets": self.targets,
             "control_features_enabled": self.control_features_enabled,
+            "control_feature_scheme": self.control_feature_scheme,
             "observation_level": self.observation_level,
             "entity_metadata": self.entity_metadata or {},
+            "per_movement_input_features": self.per_movement_input_features or [],
             "shape": {"X": list(self.X.shape), "y": list(self.y.shape)},
             "splits": {
                 "train": self.train_idx.tolist(),
@@ -138,8 +156,10 @@ class DatasetBundle:
             if "sample_signal_variants" in arrays
             else np.asarray([DEFAULT_SIGNAL_VARIANT for _ in arrays["sample_run_ids"]]),
             control_features_enabled=bool(metadata.get("control_features_enabled", True)),
+            control_feature_scheme=str(metadata.get("control_feature_scheme", "phase_state_v1")),
             observation_level=str(metadata.get("observation_level", "edge")),
             entity_metadata=metadata.get("entity_metadata", {}),
+            per_movement_input_features=list(metadata.get("per_movement_input_features", [])),
         )
 
     def metadata_for_artifact(self) -> dict[str, Any]:
@@ -150,7 +170,9 @@ class DatasetBundle:
             "entity_ids": self.edge_ids,
             "targets": self.targets,
             "observation_level": self.observation_level,
+            "control_feature_scheme": self.control_feature_scheme,
             "entity_metadata": self.entity_metadata or {},
+            "per_movement_input_features": self.per_movement_input_features or [],
             "x_mean": self.x_mean.tolist(),
             "x_std": self.x_std.tolist(),
             "y_mean": self.y_mean.tolist(),
@@ -188,7 +210,13 @@ def build_dataset_from_csv(
 
     entity_ids, entity_metadata = resolve_entities(config, df, observation_level)
     targets = list(config.targets)
-    input_features = resolve_input_features(targets, observation_level, include_control_features)
+    control_feature_scheme = getattr(config, "control_feature_scheme", "phase_state_v1")
+    input_features = resolve_input_features(
+        targets,
+        observation_level,
+        include_control_features,
+        control_feature_scheme,
+    )
     feature_names = [
         f"{entity_id}__{feature}"
         for entity_id in entity_ids
@@ -237,8 +265,12 @@ def build_dataset_from_csv(
 
             for entity_id in entity_ids:
                 row = by_entity[entity_id]
+                entity_meta = entity_metadata.get(entity_id, {})
                 for feature in input_features:
-                    value = _safe_float(getattr(row, column_for_feature(feature), 0.0), 0.0)
+                    value = _safe_float(
+                        feature_value_from_row(row, feature, entity_meta),
+                        0.0,
+                    )
                     input_values.append(value)
                     if feature == INCIDENT_COLUMN:
                         incident_any = incident_any or value > 0.0
@@ -312,6 +344,7 @@ def build_dataset_from_csv(
     y_std = y_train_flat.std(axis=0).astype(np.float32)
     x_std[x_std < 1e-6] = 1.0
     y_std[y_std < 1e-6] = 1.0
+    preserve_raw_feature_scale(feature_names, x_mean, x_std)
 
     return DatasetBundle(
         X=X_arr,
@@ -334,8 +367,10 @@ def build_dataset_from_csv(
         sample_incident_flags=sample_incident_flags_arr,
         sample_signal_variants=sample_signal_variants_arr,
         control_features_enabled=include_control_features,
+        control_feature_scheme=control_feature_scheme,
         observation_level=observation_level,
         entity_metadata=entity_metadata,
+        per_movement_input_features=input_features if observation_level == "movement" else None,
     )
 
 
@@ -395,14 +430,14 @@ def resolve_input_features(
     targets: list[str],
     observation_level: str,
     include_control_features: bool,
+    control_feature_scheme: str = "phase_state_v1",
 ) -> list[str]:
     if observation_level == "movement":
-        features = [
-            feature
-            for feature in MOVEMENT_INPUT_FEATURES
-            if include_control_features or feature not in CONTROL_FEATURE_COLUMNS
-        ]
-        return features
+        if not include_control_features:
+            return list(BASE_MOVEMENT_INPUT_FEATURES)
+        if control_feature_scheme == "phase_embed_graph_v1":
+            return [*BASE_MOVEMENT_INPUT_FEATURES, *PHASE_EMBED_FEATURES]
+        return list(MOVEMENT_INPUT_FEATURES)
     return [
         *targets,
         INCIDENT_COLUMN,
@@ -495,9 +530,11 @@ def window_to_matrix(
     targets: list[str],
     config: PredictionConfig,
     feature_names: list[str] | None = None,
+    entity_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> np.ndarray:
     rows: list[list[float]] = []
     inferred_start = datetime.fromisoformat(config.simulation_start_iso)
+    entity_metadata = entity_metadata or {}
     for step_index, raw_step in enumerate(window):
         step = _as_dict(raw_step)
         by_node = {
@@ -522,6 +559,7 @@ def window_to_matrix(
             values = _values_from_feature_names(
                 feature_names,
                 by_entity,
+                entity_metadata,
                 targets,
                 tod_sin,
                 tod_cos,
@@ -530,12 +568,13 @@ def window_to_matrix(
             values = []
             for edge_id in edge_ids:
                 node = by_entity.get(edge_id, {})
+                entity_meta = entity_metadata.get(edge_id, {})
                 for target in targets:
                     value = value_from_entity(node, target)
                     values.append(float(value or 0.0))
                 values.append(_safe_float(node.get(INCIDENT_COLUMN), 0.0))
-                for column, default in CONTROL_FEATURE_DEFAULTS.items():
-                    values.append(_safe_float(node.get(column, default), default))
+                for feature in PHASE_STATE_FEATURES:
+                    values.append(_safe_float(phase_feature_value(node, entity_meta, feature), 0.0))
             values.extend([tod_sin, tod_cos])
         rows.append(values)
     return np.asarray(rows, dtype=np.float32)
@@ -666,6 +705,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 def _values_from_feature_names(
     feature_names: list[str],
     by_edge: dict[str | None, dict[str, Any]],
+    entity_metadata: dict[str, dict[str, Any]],
     targets: list[str],
     tod_sin: float,
     tod_cos: float,
@@ -684,16 +724,88 @@ def _values_from_feature_names(
 
         edge_id, feature = feature_name.rsplit("__", 1)
         node = by_edge.get(edge_id, {})
+        entity_meta = entity_metadata.get(edge_id, {})
         if feature in targets:
             value = value_from_entity(node, feature)
             values.append(_safe_float(value, 0.0))
         elif feature == INCIDENT_COLUMN:
             values.append(_safe_float(node.get(INCIDENT_COLUMN), 0.0))
+        elif feature in PHASE_STATE_FEATURES or feature in PHASE_EMBED_FEATURES:
+            values.append(_safe_float(phase_feature_value(node, entity_meta, feature), 0.0))
         elif feature in CONTROL_FEATURE_DEFAULTS:
             values.append(_safe_float(node.get(feature), CONTROL_FEATURE_DEFAULTS[feature]))
         else:
             values.append(_safe_float(value_from_entity(node, feature), 0.0))
     return values
+
+
+def feature_value_from_row(
+    row: Any,
+    feature: str,
+    entity_meta: dict[str, Any],
+) -> float:
+    if feature == "phase_id_embed":
+        return _safe_float(getattr(row, "phase_id", CONTROL_FEATURE_DEFAULTS["phase_id"]), -1.0)
+    if feature == "signal_state_embed":
+        return signal_state_code(getattr(row, "signal_state", ""))
+    if feature in PHASE_STATE_FEATURES:
+        row_dict = row._asdict() if hasattr(row, "_asdict") else {}
+        return phase_feature_value(row_dict, entity_meta, feature)
+    return _safe_float(getattr(row, column_for_feature(feature), 0.0), 0.0)
+
+
+def phase_feature_value(
+    entity: dict[str, Any],
+    entity_meta: dict[str, Any],
+    feature: str,
+) -> float:
+    if feature == "phase_id_embed":
+        return _safe_float(entity.get("phase_id"), -1.0)
+    if feature == "signal_state_embed":
+        return signal_state_code(entity.get("signal_state", ""))
+    if feature == "phase_elapsed_s":
+        return _safe_float(entity.get("phase_elapsed_s"), 0.0)
+    if feature == "green_remaining_s":
+        return _safe_float(entity.get("green_remaining_s"), 0.0)
+
+    phase_id = _safe_float(entity.get("phase_id"), CONTROL_FEATURE_DEFAULTS["phase_id"])
+    green_phase_ids = entity_meta.get("green_phase_ids", [])
+    is_green = 1.0 if int(round(phase_id)) in _normalized_phase_ids(green_phase_ids) else 0.0
+    if feature == "is_green":
+        return is_green
+    if feature == "is_red_or_yellow":
+        return 1.0 - is_green
+    return 0.0
+
+
+def signal_state_code(value: Any) -> float:
+    state = str(value) if value is not None else ""
+    if not state:
+        return DEFAULT_SIGNAL_STATE_CODE
+    return SIGNAL_STATE_TO_CODE.get(state[0], DEFAULT_SIGNAL_STATE_CODE)
+
+
+def preserve_raw_feature_scale(
+    feature_names: list[str],
+    x_mean: np.ndarray,
+    x_std: np.ndarray,
+) -> None:
+    for idx, feature_name in enumerate(feature_names):
+        if feature_name.endswith("__phase_id_embed") or feature_name.endswith("__signal_state_embed"):
+            x_mean[idx] = 0.0
+            x_std[idx] = 1.0
+
+
+def _normalized_phase_ids(values: Any) -> set[int]:
+    normalized: set[int] = set()
+    if not isinstance(values, list):
+        return normalized
+    for value in values:
+        try:
+            normalized.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    return normalized
 
 
 def value_from_entity(node: dict[str, Any], feature: str) -> Any:

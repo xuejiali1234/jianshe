@@ -38,6 +38,24 @@ INCIDENT_CLOSURE_TEMPLATES = {
     "mainline_edge_closure": ("472652453#2", "472652453#3"),
     "downstream_edge_closure": ("1324604419#0", "1324604419#1"),
 }
+LANE_INCIDENT_TEMPLATES = {
+    "north_j9_e13": {
+        "affected_edges": ("E13",),
+        "affected_lanes": ("E13_1",),
+    },
+    "north_j9_minus_e13": {
+        "affected_edges": ("-E13",),
+        "affected_lanes": ("-E13_1",),
+    },
+    "west_minus_e21_32": {
+        "affected_edges": ("-E21.32",),
+        "affected_lanes": ("-E21.32_1",),
+    },
+    "west_e26_73": {
+        "affected_edges": ("E26.73",),
+        "affected_lanes": ("E26.73_1",),
+    },
+}
 EVENT_VCLASS_BLOCKLIST = ("passenger",)
 SIGNAL_VARIANT_GREEN_SCALES = {
     "webster_base": 1.0,
@@ -55,6 +73,7 @@ class Scenario:
     incident_start_s: int = 0
     incident_end_s: int = 0
     affected_edges: tuple[str, ...] = field(default_factory=tuple)
+    affected_lanes: tuple[str, ...] = field(default_factory=tuple)
     signal_variant: str = "webster_base"
     event_type: str = ""
     event_policy: str = ""
@@ -69,6 +88,8 @@ class Scenario:
             return f"S4_vsl_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
         if self.scenario_id == "S5_incident":
             return f"S5_incident_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
+        if self.scenario_id == "S5_lane_incident":
+            return f"S5_lane_incident_{self.incident_type}_scale_{scale_tag}_seed_{self.seed}"
         return f"{self.scenario_id}_scale_{scale_tag}_seed_{self.seed}"
 
     @property
@@ -135,6 +156,24 @@ def default_scenarios(preset: str = "full") -> list[Scenario]:
         for scale in event_scales
         for seed in seeds
     ]
+    lane_incidents = [
+        Scenario(
+            scenario_id="S5_lane_incident",
+            demand_scale=scale,
+            seed=seed,
+            incident_type=incident_type,
+            incident_start_s=EVENT_WINDOW[0],
+            incident_end_s=EVENT_WINDOW[1],
+            affected_edges=tuple(template["affected_edges"]),
+            affected_lanes=tuple(template["affected_lanes"]),
+            event_type="incident_lane_closure",
+            event_policy="single_lane_passenger_closure",
+            speed_factor=0.0,
+        )
+        for incident_type, template in LANE_INCIDENT_TEMPLATES.items()
+        for scale in (1.30, 1.50)
+        for seed in seeds
+    ]
     scenarios = [*regular, *vsl, *closures, *control]
     if preset == "full":
         return scenarios
@@ -145,6 +184,8 @@ def default_scenarios(preset: str = "full") -> list[Scenario]:
             if scenario.scenario_id != "S4_vsl"
             or abs(scenario.demand_scale - 1.30) < 1e-6
         ]
+    if preset == "lane_incident_v1":
+        return lane_incidents
     raise ValueError(f"Unknown scenario preset: {preset}")
 
 
@@ -210,6 +251,8 @@ def write_manifest(rows: list[dict], manifest_path: Path | None = None) -> None:
                 "incident_start_s",
                 "incident_end_s",
                 "affected_edges",
+                "affected_lanes",
+                "lane_closure_count",
                 "route_file",
                 "net_file",
                 "status",
@@ -254,20 +297,30 @@ def collect_lane_disallowed_baseline(
     scenario: Scenario,
     net_obj: sumolib.net.Net,
 ) -> dict[str, tuple[str, ...]]:
-    if scenario.event_type != "incident_closure":
+    if scenario.event_type not in {"incident_closure", "incident_lane_closure"}:
         return {}
     lane_disallowed: dict[str, tuple[str, ...]] = {}
-    for edge_id in scenario.affected_edges:
+    lane_ids: list[str] = []
+    if scenario.event_type == "incident_lane_closure":
+        lane_ids.extend(scenario.affected_lanes)
+    else:
+        for edge_id in scenario.affected_edges:
+            try:
+                edge = net_obj.getEdge(edge_id)
+            except Exception:
+                continue
+            lane_ids.extend(lane.getID() for lane in edge.getLanes())
+    for lane_id in lane_ids:
+        if lane_id in lane_disallowed:
+            continue
         try:
-            edge = net_obj.getEdge(edge_id)
+            net_obj.getLane(lane_id)
         except Exception:
             continue
-        for lane in edge.getLanes():
-            lane_id = lane.getID()
-            try:
-                lane_disallowed[lane_id] = tuple(traci.lane.getDisallowed(lane_id))
-            except Exception:
-                lane_disallowed[lane_id] = tuple()
+        try:
+            lane_disallowed[lane_id] = tuple(traci.lane.getDisallowed(lane_id))
+        except Exception:
+            lane_disallowed[lane_id] = tuple()
     return lane_disallowed
 
 
@@ -289,7 +342,7 @@ def apply_event_controls(
             speed_factor = scenario.speed_factor if scenario.speed_factor > 0 else VSL_SPEED_FACTOR
             for edge_id, base_speed in baseline_speeds.items():
                 traci.edge.setMaxSpeed(edge_id, max(0.1, base_speed * speed_factor))
-        elif scenario.event_type == "incident_closure":
+        elif scenario.event_type in {"incident_closure", "incident_lane_closure"}:
             for lane_id, disallowed in baseline_lane_disallowed.items():
                 merged = sorted(set(disallowed) | set(EVENT_VCLASS_BLOCKLIST))
                 traci.lane.setDisallowed(lane_id, merged)
@@ -309,7 +362,7 @@ def restore_event_controls(
     if scenario.event_type == "vsl_speed_drop":
         for edge_id, base_speed in baseline_speeds.items():
             traci.edge.setMaxSpeed(edge_id, base_speed)
-    elif scenario.event_type == "incident_closure":
+    elif scenario.event_type in {"incident_closure", "incident_lane_closure"}:
         for lane_id, disallowed in baseline_lane_disallowed.items():
             traci.lane.setDisallowed(lane_id, list(disallowed))
 
@@ -446,6 +499,8 @@ def run_one_scenario(
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
             "affected_edges": "|".join(scenario.affected_edges),
+            "affected_lanes": "|".join(scenario.affected_lanes),
+            "lane_closure_count": len(scenario.affected_lanes),
             "route_file": str(route_path),
             "net_file": str(scenario_net_file),
             "status": "ok",
@@ -473,6 +528,8 @@ def run_one_scenario(
             "incident_start_s": scenario.incident_start_s or "",
             "incident_end_s": scenario.incident_end_s or "",
             "affected_edges": "|".join(scenario.affected_edges),
+            "affected_lanes": "|".join(scenario.affected_lanes),
+            "lane_closure_count": len(scenario.affected_lanes),
             "route_file": str(route_path),
             "net_file": str(scenario_net_file),
             "status": "error",
@@ -575,9 +632,9 @@ def main() -> None:
     parser.add_argument("--scenario-dir", type=Path, default=None)
     parser.add_argument(
         "--scenario-preset",
-        choices=["full", "fast_v2"],
+        choices=["full", "fast_v2", "lane_incident_v1"],
         default="full",
-        help="Use full 72-run scenario suite or the 60-run fast V2 suite with reduced S4 VSL runs.",
+        help="Use full 72-run suite, fast_v2 reduced suite, or lane_incident_v1 24-run incremental lane-closure suite.",
     )
     parser.add_argument(
         "--scenario-filter",

@@ -1,84 +1,105 @@
 # 交通流预测与信号控制数字孪生平台
 
-本项目面向城市道路交通运行分析、短时交通流预测与信号放行控制研究，构建了一套基于 `SUMO + TraCI + FastAPI + WebSocket + Web 地图看板` 的一体化数字孪生平台。系统既支持实时仿真展示，也支持批量场景生成、movement 级预测模型训练、事故与限速扰动分析，以及单路口强化学习信号控制实验。
+本项目面向城市道路交通运行分析、短时交通流预测与信号放行控制研究，构建了一套基于 `SUMO + TraCI + FastAPI + WebSocket + Web 地图看板` 的一体化数字孪生平台。系统支持实时仿真展示、批量场景生成、movement 级交通状态预测、事故与限速扰动分析，以及单路口/多路口强化学习信号控制实验。
 
-当前工程的默认研究口径已经从早期的 edge 级检测切换为 **movement 级预测链路**。预测对象不再是单条短进口 edge，而是由 `tls_id + incoming_edge + turn_type + outgoing_edge` 构成的转向交通流单元。该设计更适合表达交叉口左转、直行、右转之间的差异，也更便于后续做相位级控制聚合。
+当前工程已经从早期的 edge 级检测口径收敛到 **movement 级预测 + 相位级控制聚合** 这一条主线。预测对象由
 
-## 当前默认链路
+```text
+tls_id + incoming_edge + turn_type + outgoing_edge
+```
 
-当前默认使用的是 `full_v3` 正式链路：
+共同定义，能更好地区分左转、直行、右转等不同交通流单元，也更适合与信号相位控制做联动。
 
-- 训练数据：`data/raw/batch_movement_aggregates_full_v3.csv`
-- 场景清单：`data/raw/scenarios_full_v3/manifest.csv`
-- 预测配置：`configs/prediction_config.json`
-- 模型产物：`models/artifacts_full_v3`
-- 指标报告：`reports/full_v3_training/metrics.csv`
-- 默认信号网：`data/processed/czq_tls_webster.net.xml`
+## 1. 当前正式可用主线
 
-预测配置中的关键参数如下：
+### 1.1 预测主模型
 
-- `observation_level = movement`
-- `sample_interval_s = 60`
-- `history_steps = 12`
-- `horizon_steps = 15`
-- `targets = [arrival_flow, mean_speed, queue_veh]`
-- `base_demand_factor = 0.25`
-- `active_model_from_registry = true`
-- `preferred_model = transformer_v2`
-- `fallback_model = ha_baseline`
+当前正式推荐的预测主模型为：
 
-说明：
+- `Transformer V1`
+- 训练数据：`full_v3 + 精选 lane incident`
+- 模型目录：`models/artifacts_full_v3_plus_lane_incident_v1_selected`
+- 报告目录：`reports/full_v3_plus_lane_incident_v1_selected`
 
-- 服务启动时优先读取 `models/artifacts_full_v3/model_registry.json`
-- 当前 full_v3 训练结果中，registry 的 `active_model` 是 `transformer_v1`
-- 因此在线预测服务会默认加载 `transformer_v1`，加载失败或历史窗口不足时回退到 `ha_baseline`
+核心结果：
 
-## 项目目标
+- `overall MAE = 0.7136`
+- `overall RMSE = 1.5602`
+- `overall WAPE = 0.2526`
 
-本项目并不只关注单一预测模型，而是围绕“仿真—采集—预测—控制—展示”构建完整实验闭环，主要目标包括：
+这一版在常规场景和事件场景上都优于此前的 `full_v3` 版本，是当前预测主线的正式口径。
 
-- 在 SUMO 中构建可重复的城市路网交通数字孪生平台
-- 以 movement 为核心观测单元生成短时交通预测数据
-- 训练并评估 `HA / XGBoost / LSTM / Transformer V1 / Transformer V2`
-- 将训练后的模型接回同一套 Web 服务，支撑实时预测与场景对比
-- 在统一仿真环境中实现 `Webster / MaxPressure / DQN` 信号控制实验
-- 分析“无预测控制”与“预测增强控制”之间的差异
+### 1.2 单路口 RL 正式参考结果
 
-## 平台能力概览
+当前单路口控制正式参考 checkpoint 为：
 
-### 1. 实时仿真看板
+- `DQN-pred-v1-v3 @ 9000 steps`
+- 文件：
+  `models/artifacts_rl/anticipatory_v3_long/checkpoints/dqn_pred_v1_anticipatory_v3_long/dqn_signal_single_tls_dqn_pred_v1_anticipatory_v3_long_9000_steps.zip`
+- 正式材料：
+  `reports/rl_signal_control/anticipatory_v3_checkpoint_9000_formal`
 
-运行 `python app.py` 后，系统会启动 FastAPI 服务，并在后台启动 SUMO 仿真。前端地图看板通过 WebSocket 持续接收：
+该版本是单路口预测增强 RL 的综合最优 checkpoint。
+
+### 1.3 多路口联动正式结果
+
+当前多路口正式主结果采用西侧 3 路口强簇：
+
+- `12254641672`（对应 `E23.226`）
+- `12254692358`（对应 `E26.232`）
+- `J42`（对应 `E31.70`）
+
+正式结果分为两条：
+
+- 多路口主结果：
+  `west_multi_no_pred_v1 @ 5000`
+- 预测增强对照：
+  `west_multi_pred_v1 @ 2000`
+
+对应目录：
+
+- 模型：
+  `models/artifacts_rl_multi/west_v1`
+- 正式材料：
+  `reports/rl_signal_control_multi/west_v1_formal`
+- checkpoint 扫描：
+  `reports/rl_signal_control_multi/west_v1_checkpoint_scan`
+
+当前结论是：
+
+- `west_multi_no_pred_v1 @ 5000` 为三场景综合最优
+- `west_multi_pred_v1 @ 2000` 在事故响应上更敏感，但综合指标仍弱于 `no-pred`
+
+## 2. 平台能力概览
+
+### 2.1 实时仿真与 Web 看板
+
+运行 `python app.py` 后，系统会启动 FastAPI 服务，并驱动 SUMO 仿真。前端通过 WebSocket 持续接收：
 
 - 车辆位置与朝向
 - 路网运行状态
 - 排队、速度、流量等统计指标
 - 信号灯与相位状态
 - movement 聚合后的实时预测结果
-- 事故 / 限速对比结果
+- 场景扰动下的对比信息
 
-### 2. movement 级短时交通流预测
+### 2.2 movement 级短时交通流预测
 
-系统默认采用 movement 级建模。每个 movement 由以下四元组定义：
+当前默认的预测设定为：
 
-```text
-m = (tls_id, incoming_edge, turn_type, outgoing_edge)
-```
+- `observation_level = movement`
+- `sample_interval_s = 60`
+- `history_steps = 12`
+- `horizon_steps = 15`
+- `targets = [arrival_flow, mean_speed, queue_veh]`
 
-当前 full_v3 数据中共包含：
+当前正式训练集下共有：
 
 - `151` 个 movement
-- 输入窗口：`12` 个历史步
-- 输出窗口：`15` 个未来步
-- 输出维度：`151 × 3 = 453`
+- 输入张量形状：`[N, 12, 1663]`
+- 输出张量形状：`[N, 15, 453]`
 
-预测目标包括：
-
-- `arrival_flow`
-- `mean_speed_mps`
-- `queue_veh`
-
-当前模型族包括：
+模型族当前包含：
 
 - `ha_baseline`
 - `xgboost`
@@ -86,9 +107,11 @@ m = (tls_id, incoming_edge, turn_type, outgoing_edge)
 - `transformer_v1`
 - `transformer_v2`
 
-### 3. 批量场景生成
+其中当前正式主模型为 `transformer_v1`。
 
-批量仿真脚本支持多类需求与扰动场景，当前 full 口径包含：
+### 2.3 批量场景生成
+
+现有正式场景主集为 `full_v3`，包含：
 
 - `S1_normal`
 - `S2_peak`
@@ -97,97 +120,120 @@ m = (tls_id, incoming_edge, turn_type, outgoing_edge)
 - `S4_vsl`
 - `S5_incident`
 
-其中：
+在此基础上，又新增了更贴近真实事故的 lane 级增量场景：
 
-- `S3_control` 表示信号配时扰动
-- `S4_vsl` 表示可变限速扰动
-- `S5_incident` 表示更接近真实事故的封停 / 容量受限场景
+- `S5_lane_incident_v1`
 
-### 4. 信号控制实验
+本轮最终并入正式训练主线的是精选子集：
 
-项目当前已经具备单路口强化学习信号控制骨架，目标路口默认配置在：
+- `north_j9_e13`
+- `north_j9_minus_e13`
+- `west_minus_e21_32`
+
+对应合并数据文件为：
+
+- `data/raw/batch_movement_aggregates_full_v3_plus_lane_incident_v1_selected.csv`
+
+### 2.4 信号控制实验
+
+当前控制实验主线包含：
+
+- 规则控制：`Webster`
+- 压力控制：`MaxPressure`
+- 单路口 RL：`DQN-no-pred`、`DQN-pred-v1`
+- 多路口联动 RL：共享策略 `DQN-no-pred`、`DQN-pred-v1`
+
+其中单路口和多路口均采用：
+
+- 主绿灯相位控制
+- 黄灯/全红安全过渡
+- 相位级聚合状态
+- 可接入预测增强状态与前瞻型 reward
+
+## 3. 当前关键数据与配置
+
+### 3.1 预测训练主线
+
+- 数据：
+  `data/raw/batch_movement_aggregates_full_v3_plus_lane_incident_v1_selected.csv`
+- 数据集目录：
+  `data/datasets/full_v3_plus_lane_incident_v1_selected`
+- 模型目录：
+  `models/artifacts_full_v3_plus_lane_incident_v1_selected`
+- 报告目录：
+  `reports/full_v3_plus_lane_incident_v1_selected`
+
+### 3.2 多路口西侧强簇配置
+
+- 联动图：
+  `data/processed/tls_coordination_graph_west_v1.json`
+- 多路口配置：
+  `configs/rl_multi_signal_config_west_v1.json`
+
+### 3.3 多路口预测桥配置
+
+为避免直接改动全局默认预测桥，多路口 RL 当前单独使用：
+
+- `configs/prediction_config_full_v3_plus_lane_incident_v1_selected.json`
+
+这使得多路口 RL 能稳定调用新的 `Transformer V1` 预测桥，而不强行改动网页服务的全局默认配置。
+
+## 4. 项目结构
 
 ```text
-configs/rl_signal_config.json
+app.py
+configs/
+data/
+models/
+prediction/
+reports/
+rl/
+sim/
+static/
+scripts/
 ```
 
-当前控制对照策略包括：
+重点目录说明：
 
-- `webster`
-- `max_pressure`
-- `dqn_no_pred`
-- `dqn_pred_v2`（预测增强 DQN 实验入口）
+- `prediction/`
+  预测数据集构建、模型定义、训练与加载逻辑
+- `rl/`
+  单路口和多路口控制环境、奖励函数、训练与评估入口
+- `sim/`
+  SUMO 路网、场景生成、批量仿真与 movement 采集脚本
+- `reports/`
+  各阶段实验报告、对比表和图像输出
+- `models/`
+  训练得到的正式与中间模型产物
 
-RL 状态采用相位级聚合，不直接把所有 movement 原始值塞给控制器。这样可以更贴合“当前应放行哪个相位”的决策语义。
+## 5. 环境准备
 
-## 当前实验状态
+### 5.1 Conda 环境
 
-### full_v3 预测训练
-
-当前 full_v3 正式数据集摘要：
-
-- `X_shape = [2448, 12, 1512]`
-- `y_shape = [2448, 15, 453]`
-- `n_train = 1700`
-- `n_val = 340`
-- `n_test = 408`
-
-当前 full_v3 训练中，表现最好的预测模型为：
-
-- `transformer_v1`
-
-当前模型 registry：
-
-- `active_model = transformer_v1`
-- `active_artifact = transformer_v1_model.pt`
-
-### full_v3 RL 控制
-
-当前 `reports/rl_signal_control/full_v3_pred_control/` 下已经包含：
-
-- `webster_1800_eval.csv`
-- `max_pressure_1800_eval.csv`
-- `dqn_no_pred_eval.csv`
-- `pred_v2_*_eval.csv`
-- `policy_comparison_1800.csv`
-- `sweep_summary.csv`
-
-截至目前，可以严谨表达的结论是：
-
-- `DQN-no-pred` 已达到或略优于 `MaxPressure`
-- 当前“预测增强 DQN”链路已经跑通
-- 但在 full_v3 同口径实验下，尚未证明预测增强控制优于无预测控制
-
-## 环境准备
-
-### 1. 创建 Conda 环境
-
-推荐使用 Python 3.10：
+建议使用 Python 3.10：
 
 ```cmd
 conda create -n traffic_pred python=3.10 -y
 conda activate traffic_pred
 ```
 
-### 2. 安装依赖
-
-基础依赖：
+### 5.2 安装依赖
 
 ```cmd
 pip install -r requirements_web.txt
 ```
 
-PyTorch 建议根据本机 CUDA 环境单独安装。示例：
+### 5.3 安装 PyTorch
 
-CPU 版本：
+CPU 版本示例：
 
 ```cmd
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 ```
 
-GPU 版本请按本机 CUDA 版本选择对应 wheel。
+如本机有 CUDA，请根据本机驱动和 CUDA 版本安装对应 GPU 版本。
 
-### 3. 配置 SUMO Python 工具
+### 5.4 配置 SUMO
 
 如果 SUMO 安装在 `D:\SUMO`，可配置：
 
@@ -203,9 +249,9 @@ sumo --version
 python -c "import traci, sumolib; print('SUMO tools OK')"
 ```
 
-## 快速启动
+## 6. 快速启动
 
-启动系统：
+启动平台：
 
 ```cmd
 python app.py
@@ -217,321 +263,33 @@ python app.py
 http://127.0.0.1:8000
 ```
 
-服务启动后，后端会加载预测配置与模型服务，并在后台启动 SUMO 仿真。关闭网页不会终止 SUMO；终止 `python app.py` 才会结束当前运行。
+## 7. 常用命令
 
-## 常用命令
-
-### 1. 生成信号灯路网
+### 7.1 训练当前正式预测主线
 
 ```cmd
-python -m sim.scripts.build_webster_tls_net --overwrite
+python -m prediction.training --csv data/raw/batch_movement_aggregates_full_v3_plus_lane_incident_v1_selected.csv --dataset-dir data/datasets/full_v3_plus_lane_incident_v1_selected --artifact-dir models/artifacts_full_v3_plus_lane_incident_v1_selected --report-dir reports/full_v3_plus_lane_incident_v1_selected
 ```
 
-输出通常位于：
-
-- `data/processed/czq_tls_webster.net.xml`
-- `data/processed/czq_tls_webster_summary.json`
-
-### 2. 生成 movement 字典
+### 7.2 训练西侧强簇多路口 no-pred
 
 ```cmd
-python -m sim.scripts.build_movement_config
+python -m rl.train_multi_dqn --config configs/rl_multi_signal_config_west_v1.json --timesteps 5000 --sim-end 1800 --use-prediction false --out-dir models/artifacts_rl_multi/west_v1 --report-dir reports/rl_signal_control_multi/west_v1 --run-name west_multi_no_pred_v1 --device cuda --checkpoint-every 1000
 ```
 
-输出通常位于：
-
-- `configs/movement_config.json`
-- `data/processed/movement_map.csv`
-
-### 3. 构建 movement 图结构
+### 7.3 训练西侧强簇多路口 pred-v1
 
 ```cmd
-python -m sim.scripts.build_movement_graph --movement-config configs/movement_config.json --out data/processed/movement_graph.json
+python -m rl.train_multi_dqn --config configs/rl_multi_signal_config_west_v1.json --timesteps 5000 --sim-end 1800 --use-prediction true --use-prediction-reward true --reward-mode anticipatory_delta_pressure_v2 --out-dir models/artifacts_rl_multi/west_v1 --report-dir reports/rl_signal_control_multi/west_v1 --run-name west_multi_pred_v1 --device cuda --checkpoint-every 1000
 ```
 
-### 4. 批量运行 SUMO 生成训练数据
+## 8. 当前阶段建议
 
-完整 full 场景：
+如果现在要做项目展示、论文书写或答辩，建议优先围绕以下四个结果展开：
 
-```cmd
-python -m sim.scripts.run_batch_sumo --overwrite --scenario-preset full --sim-end 3600 --collector movement --output-csv data/raw/batch_movement_aggregates_full_v3.csv --scenario-dir data/raw/scenarios_full_v3
-```
+1. `Transformer V1`（lane incident selected 版）作为预测主模型
+2. `DQN-pred-v1-v3 @ 9000` 作为单路口正式参考结果
+3. `west_multi_no_pred_v1 @ 5000` 作为多路口联动主结果
+4. `west_multi_pred_v1 @ 2000` 作为多路口预测增强对照结果
 
-小样本 smoke：
-
-```cmd
-python -m sim.scripts.run_batch_sumo --overwrite --scenario-preset full --limit 3 --sim-end 1800 --collector movement --output-csv data/raw/batch_movement_aggregates_full_v3_smoke.csv --scenario-dir data/raw/scenarios_full_v3_smoke
-```
-
-### 5. movement 数据 QA
-
-```cmd
-python -m sim.scripts.inspect_movement_catalog --movement-config configs/movement_config.json --out reports/movement_catalog_quality.json
-python -m sim.scripts.diagnose_movement_data --csv data/raw/batch_movement_aggregates_full_v3.csv --manifest data/raw/scenarios_full_v3/manifest.csv --out reports/movement_data_quality_full_v3.json
-```
-
-### 6. 训练预测模型
-
-```cmd
-python -m prediction.training --csv data/raw/batch_movement_aggregates_full_v3.csv --dataset-dir data/datasets/full_v3_movement_control --artifact-dir models/artifacts_full_v3 --report-dir reports/full_v3_training --update-config
-```
-
-训练脚本会完成：
-
-- 数据集构建
-- HA / XGBoost / LSTM / Transformer V1 / Transformer V2 训练与评估
-- 生成 `metrics.csv`
-- 生成 `model_registry.json`
-- 将配置更新到新的 artifact 路径
-
-### 7. RL 基线评估
-
-```cmd
-python -m rl.evaluate_policy --config configs/rl_signal_config.json --policy webster --sim-end 1800 --out reports/rl_signal_control/full_v3_pred_control/webster_1800_eval.csv
-python -m rl.evaluate_policy --config configs/rl_signal_config.json --policy max_pressure --sim-end 1800 --out reports/rl_signal_control/full_v3_pred_control/max_pressure_1800_eval.csv
-```
-
-### 8. 训练 DQN-no-pred
-
-```cmd
-python -m rl.train_dqn --config configs/rl_signal_config.json --timesteps 10000 --sim-end 1800 --use-prediction false --device cuda
-```
-
-### 9. 训练 / 优化预测增强 DQN
-
-单轮：
-
-```cmd
-python -m rl.train_dqn --config configs/rl_signal_config.json --timesteps 5000 --sim-end 1800 --use-prediction true --device cuda
-```
-
-多轮 sweep：
-
-```cmd
-python -m rl.optimize_pred_v2 --rounds 5 --timesteps 10000 --sim-end 1800 --device cuda --report-dir reports/rl_signal_control/full_v3_pred_control --artifact-dir models/artifacts_rl/full_v3_pred_control
-```
-
-### 10. 夜间一键全流程
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_full_v3_nightly.ps1 -Device cuda -DqnTimesteps 10000 -DqnRounds 5
-```
-
-## 主要 API
-
-### 预测配置
-
-```http
-GET /api/prediction/config
-```
-
-返回内容通常包括：
-
-- movement / edge 观察配置
-- 历史窗口和预测步长
-- 当前 active model
-- fallback 状态
-- artifact 路径
-- 输入特征维度说明
-
-### 最新预测
-
-```http
-GET /api/prediction/latest
-```
-
-返回最近一次聚合观测与预测结果。
-
-### 在线预测
-
-```http
-POST /api/predict
-```
-
-输入历史窗口，返回未来 15 步预测。当前输出同时包含：
-
-- `movements`
-- 兼容前端展示的 legacy `nodes`
-
-### 场景 run 列表
-
-```http
-GET /api/prediction/scenario-runs
-```
-
-返回场景 run 元信息，用于正常 / 限速 / 事故对比。
-
-### 场景对比
-
-```http
-POST /api/prediction/scenario-compare
-```
-
-输入正常 run、扰动 run、路段与模型，返回预测对比与差值摘要。
-
-## 目录结构
-
-```text
-.
-├── app.py
-├── configs/
-├── data/
-├── models/
-├── prediction/
-├── reports/
-├── rl/
-├── scripts/
-├── sim/
-├── static/
-├── czq.net.xml
-├── czq_demand.rou.xml
-├── intersection.sumocfg
-├── gui-settings.xml
-├── requirements_web.txt
-└── README.md
-```
-
-## 目录说明
-
-### 根目录
-
-- `app.py`：主服务入口，负责启动 FastAPI、SUMO 后台仿真、WebSocket 推送和预测 API
-- `czq.net.xml`：基础 SUMO 路网文件
-- `czq_demand.rou.xml`：基础交通需求 route 文件
-- `intersection.sumocfg`：SUMO 仿真配置
-- `gui-settings.xml`：SUMO GUI 显示配置
-- `vtypes.add.xml`：车辆类型配置
-- `requirements_web.txt`：Web 服务、数据处理、机器学习与绘图依赖
-
-### `configs/`
-
-- `prediction_config.json`：预测配置，当前默认指向 `full_v3`
-- `movement_config.json`：movement 字典定义
-- `rl_signal_config.json`：RL 信号控制配置
-- 其他信号控制相关配置文件
-
-### `prediction/`
-
-- `collector.py`：早期 edge 级采集逻辑
-- `movement_collector.py`：当前默认 movement 级采集逻辑
-- `dataset.py`：滑窗数据集构建
-- `torch_models.py`：LSTM、Transformer V1、Transformer V2 模型结构
-- `service.py`：在线预测服务与模型加载
-- `phase_aggregation.py`：movement 预测向相位级控制特征的聚合
-- `training.py`：训练、评估、保存、更新配置入口
-
-### `sim/`
-
-- `route_tools.py`：交通需求与 route 调整工具
-- `signal_timing.py`：固定配时与 Webster 风格逻辑
-- `validation.py`：环境与文件检查
-- `scripts/build_webster_tls_net.py`：生成信号灯路网
-- `scripts/build_movement_config.py`：生成 movement 字典
-- `scripts/build_movement_graph.py`：生成 movement 图结构
-- `scripts/inspect_movement_catalog.py`：movement 字典 QA
-- `scripts/diagnose_movement_data.py`：movement 数据 QA
-- `scripts/run_batch_sumo.py`：批量场景仿真入口
-
-### `rl/`
-
-- `env.py`：SUMO 信号控制环境
-- `state_builder.py`：RL 状态构造
-- `phase_controller.py`：安全切相信号执行逻辑
-- `reward.py`：奖励函数
-- `baselines.py`：Webster / MaxPressure 基线
-- `train_dqn.py`：SB3 DQN 训练脚本
-- `evaluate_policy.py`：控制策略评估脚本
-- `optimize_pred_v2.py`：预测增强 DQN 多轮优化
-- `summarize_results.py`：结果汇总与图表生成
-
-### `static/`
-
-- `index.html`：前端页面结构
-- `css/style.css`：前端样式
-- `js/main.js`：地图渲染、车辆显示、WebSocket、预测面板与控制展示逻辑
-- `assets/`：车辆图标与其他静态资源
-
-### `data/`
-
-- `raw/`：实时与批量仿真原始聚合输出
-- `processed/`：处理后的信号网、movement 图和摘要文件
-- `datasets/`：训练数据集缓存
-- `archive/`：历史训练产物与旧实验归档
-
-### `models/`
-
-- `artifacts_full_v3/`：当前正式 full_v3 模型产物
-- `artifacts_rl/`：RL 控制模型产物
-
-### `reports/`
-
-- `full_v3_training/`：预测训练指标、摘要与图表
-- `rl_signal_control/full_v3_pred_control/`：RL 控制评估结果、对比表与 sweep 摘要
-- 其他 QA、诊断和中间分析报告
-
-## 数据口径说明
-
-当前默认训练数据为 movement 长表。常见字段包括：
-
-- `run_id`
-- `scenario_id`
-- `timestamp`
-- `step`
-- `movement_id`
-- `tls_id`
-- `incoming_edge`
-- `outgoing_edge`
-- `turn_type`
-- `arrival_flow`
-- `discharge_flow`
-- `mean_speed_mps`
-- `speed_kmh`
-- `queue_veh`
-- `queue_meter`
-- `incident_flag`
-- `phase_id`
-- `phase_elapsed_s`
-- `green_remaining_s`
-- `signal_state`
-- `zone_quality`
-
-训练时会严格按 `run_id` 分段构建滑窗样本，避免不同仿真运行之间发生拼窗。
-
-## Git 上传策略
-
-仓库默认保留：
-
-- 代码
-- 配置
-- 基础 SUMO 文件
-- 前端页面
-- 说明文档
-
-仓库默认不上传：
-
-- 大型批量仿真 CSV
-- 训练数据集缓存
-- PyTorch 权重
-- joblib 模型文件
-- 自动生成图表
-- 历史归档数据
-
-如需复现实验，应在本地重新生成数据并重新训练。
-
-## 注意事项
-
-1. 运行前需确保 SUMO 可用，且 `sumo --version` 正常。
-2. `traci` 与 `sumolib` 来自 SUMO `tools` 目录，需要正确配置 `PYTHONPATH`。
-3. 修改 `base_demand_factor`、route 分布、signal 网或 movement 配置后，应重新生成批量数据并重训模型。
-4. 当前“预测增强 RL 已打通”不等于“预测增强 RL 已优于无预测 RL”，论文和答辩表述应保持严谨。
-5. 若 GitHub 网页可访问但 `git push` 失败，通常需要为当前仓库单独配置代理。
-
-## 后续方向
-
-从当前工程状态看，后续最有价值的推进方向包括：
-
-- 继续调优 `Transformer V2`，使其稳定超过 `Transformer V1`
-- 将 `movement_graph.json` 更显式地接入 V2 时空结构
-- 优化 RL 预测增强状态设计，减少无效前瞻特征噪声
-- 在统一 full_v3 口径下继续验证 `DQN-pred-v2` 是否优于 `DQN-no-pred`
-
+这样口径最稳，也最能反映当前工程的实际完成度。

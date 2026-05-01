@@ -16,6 +16,8 @@ POLICY_SOURCES = [
     ("Webster", "formal", "webster_1800_eval.csv"),
     ("MaxPressure", "formal", "max_pressure_1800_eval.csv"),
     ("DQN-no-pred", "formal", "dqn_no_pred_eval.csv"),
+    ("DQN-pred-v1", "formal", "dqn_pred_v1_eval.csv"),
+    ("DQN-pred-v1-smoke", "smoke", "dqn_pred_v1_smoke_eval.csv"),
     ("DQN-pred-v2", "formal", "dqn_pred_v2_eval.csv"),
     ("DQN-pred-v2-smoke", "smoke", "dqn_pred_v2_smoke_eval.csv"),
 ]
@@ -39,7 +41,7 @@ def main() -> None:
     )
 
     has_prediction_result = any(
-        row.get("policy") in {"DQN-pred-v2", "DQN-pred-v2-smoke"}
+        row.get("policy") in {"DQN-pred-v1", "DQN-pred-v1-smoke", "DQN-pred-v2", "DQN-pred-v2-smoke"}
         or row.get("prediction_available_share", "0.00") not in {"", "0.00"}
         for row in summary_rows
     )
@@ -49,7 +51,7 @@ def main() -> None:
         report_dir / "policy_comparison_with_prediction.md",
         prediction_rows,
         title="RL Prediction-Enhanced Policy Comparison",
-        note="DQN-pred-v2 smoke rows only prove that the prediction-enhanced state and evaluation pipeline can run.",
+        note="DQN-pred-v1 is the current stable prediction-enhanced policy target; DQN-pred-v2 rows are legacy exploratory results.",
     )
 
     figure_paths = [
@@ -61,11 +63,18 @@ def main() -> None:
             "DQN-no-pred Training Curves",
         ),
         _plot_training_curves(
+            report_dir / "dqn_training_log_pred_v1.csv",
+            report_dir,
+            args.window,
+            "pred_v1",
+            "DQN-pred-v1 Training Curves",
+        ),
+        _plot_training_curves(
             report_dir / "dqn_training_log_pred_v2.csv",
             report_dir,
             args.window,
-            "pred_v2",
-            "DQN-pred-v2 Training Curves",
+            "pred_v2_legacy",
+            "DQN-pred-v2 Legacy Training Curves",
         ),
     ]
 
@@ -92,10 +101,29 @@ def _build_policy_summary(report_dir: Path) -> list[dict[str, str]]:
         speed_values = [_float(row.get("mean_speed_mps")) for row in records]
         switch_count = sum(int(_float(row.get("switch_applied"))) for row in records)
         fallback_count = sum(int(_float(row.get("transition_fallback"))) for row in records)
+        program_mismatch_count = sum(int(_float(row.get("transition_program_mismatch"))) for row in records)
         prediction_available = [_float(row.get("prediction_available")) for row in records]
         prediction_fallback = [_float(row.get("prediction_fallback_used")) for row in records]
         prediction_latency = [_float(row.get("prediction_latency_ms")) for row in records]
         prediction_snapshots = [_float(row.get("prediction_snapshots")) for row in records]
+        prediction_ready = [
+            1.0
+            if int(_float(row.get("prediction_ready"))) == 1
+            or (
+                int(_float(row.get("prediction_available"))) == 1
+                and int(_float(row.get("prediction_fallback_used"))) == 0
+            )
+            else 0.0
+            for row in records
+        ]
+        ready_records = [
+            row for row in records
+            if int(_float(row.get("prediction_ready"))) == 1
+            or (
+                int(_float(row.get("prediction_available"))) == 1
+                and int(_float(row.get("prediction_fallback_used"))) == 0
+            )
+        ]
 
         row = {
             "policy": name,
@@ -111,10 +139,23 @@ def _build_policy_summary(report_dir: Path) -> list[dict[str, str]]:
             "mean_speed_kmh": _fmt(_mean(speed_values) * 3.6),
             "switch_count": str(switch_count),
             "transition_fallback_count": str(fallback_count),
+            "transition_program_mismatch_count": str(program_mismatch_count),
             "prediction_available_share": _fmt(_mean(prediction_available)),
+            "prediction_ready_share": _fmt(_mean(prediction_ready)),
             "prediction_fallback_share": _fmt(_mean(prediction_fallback)),
             "max_prediction_snapshots": str(int(max(prediction_snapshots) if prediction_snapshots else 0)),
             "mean_prediction_latency_ms": _fmt(_mean(prediction_latency), 3),
+            "prediction_ready_steps": str(len(ready_records)),
+            "prediction_ready_mean_queue_veh": _fmt(
+                _mean([_float(item.get("queue_sum")) for item in ready_records])
+            ),
+            "prediction_ready_mean_reward": _fmt(
+                _mean([_float(item.get("reward")) for item in ready_records]),
+                4,
+            ),
+            "prediction_ready_mean_speed_kmh": _fmt(
+                _mean([_float(item.get("mean_speed_mps")) for item in ready_records]) * 3.6
+            ),
         }
         if name == "Webster":
             baseline_queue = float(row["mean_queue_veh"])

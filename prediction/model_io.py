@@ -159,6 +159,7 @@ class ArtifactPredictor:
             self.targets,
             self.config,
             self.feature_names,
+            self.entity_metadata,
         )
         X = scale_X(matrix[None, :, :], self.x_mean, self.x_std)
 
@@ -191,7 +192,11 @@ class ArtifactPredictor:
 
     def _get_torch_model(self):
         if self._torch_model is None:
-            model = build_torch_model(self.kind, self.artifact["model_config"])
+            model = build_torch_model(
+                self.kind,
+                self.artifact["model_config"],
+                entity_ids=self.edge_ids,
+            )
             model.load_state_dict(self.artifact["state_dict"])
             model.to(self.config.device)
             model.eval()

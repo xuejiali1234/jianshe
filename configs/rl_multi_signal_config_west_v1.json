@@ -1,0 +1,62 @@
+{
+  "sumo_cfg": "intersection.sumocfg",
+  "net_file": "data/processed/czq_tls_webster.net.xml",
+  "route_file": "czq_demand.rou.xml",
+  "movement_config": "configs/movement_config.json",
+  "coordination_graph": "data/processed/tls_coordination_graph_west_v1.json",
+  "prediction_config": "configs/prediction_config_full_v3_plus_lane_incident_v1_selected.json",
+  "reference_single_tls_id": "12254641672",
+  "cluster_tls_ids": [
+    "12254641672",
+    "12254692358",
+    "J42"
+  ],
+  "control_interval_s": 10,
+  "sample_interval_s": 60,
+  "warmup_s": 300,
+  "episode_s": 3600,
+  "reward_mode": "current_pressure_v1",
+  "min_green_s": 10,
+  "max_green_s": 60,
+  "min_action_green_duration_s": 5,
+  "yellow_s": 3,
+  "all_red_s": 1,
+  "use_prediction_features": false,
+  "use_prediction_reward": false,
+  "prediction_horizons": [
+    5,
+    10,
+    15
+  ],
+  "reward_weights": {
+    "queue": 1.0,
+    "waiting": 0.5,
+    "pressure": 0.4,
+    "throughput": 0.3,
+    "switch": 0.07,
+    "upstream_spillback": 0.2,
+    "downstream_pressure": 0.15,
+    "future_align": 0.18,
+    "future_peak": 0.09,
+    "future_gap": 0.12
+  },
+  "train": {
+    "algorithm": "shared_multi_tls_dqn",
+    "seed": 42,
+    "learning_rate": 0.0005,
+    "gamma": 0.99,
+    "batch_size": 64,
+    "buffer_size": 50000,
+    "learning_starts": 500,
+    "train_freq": 4,
+    "target_update_interval": 500,
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.05,
+    "epsilon_decay_steps": 10000,
+    "grad_clip": 1.0,
+    "hidden_sizes": [
+      128,
+      128
+    ]
+  }
+}

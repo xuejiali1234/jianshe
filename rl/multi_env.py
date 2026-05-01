@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import random
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -13,26 +12,24 @@ import numpy as np
 from prediction.config import load_prediction_config
 from prediction.movement_collector import MovementRealtimeCollector
 from prediction.service import PredictionService
-from sim import configure_sumo_python_path, prepare_runtime_route_file, resolve_runtime_net_file
+from sim import configure_sumo_python_path, prepare_runtime_route_file
+from sim.scripts.build_tls_coordination_graph import build_tls_coordination_graph
 
+from .env import (
+    DEFAULT_VSL_SPEED_FACTOR,
+    EVENT_VCLASS_BLOCKLIST,
+    PROJECT_ROOT,
+    _green_phase_ids_from_net,
+    _mean_speed,
+    _project_path,
+    _safe_float,
+)
+from .multi_reward import compute_multi_tls_rewards
+from .multi_state_builder import MultiTLSStateBuilder
 from .phase_controller import PhaseController
-from .reward import compute_reward
-from .state_builder import PhaseStateBuilder
-
-try:
-    import gymnasium as gym
-    from gymnasium import spaces
-except ImportError:  # pragma: no cover - reported clearly by SumoSignalGymEnv.
-    gym = None
-    spaces = None
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-EVENT_VCLASS_BLOCKLIST = ("passenger",)
-DEFAULT_VSL_SPEED_FACTOR = 0.25
-
-
-class SignalControlEnv:
+class MultiSignalControlEnv:
     def __init__(
         self,
         config_path: str | Path,
@@ -40,7 +37,7 @@ class SignalControlEnv:
         use_prediction_reward: bool | None = None,
         reward_mode: str | None = None,
         scenario_run_id: str | None = None,
-    ):
+    ) -> None:
         configure_sumo_python_path()
         import sumolib
         import traci
@@ -52,13 +49,12 @@ class SignalControlEnv:
             self.config_path = PROJECT_ROOT / self.config_path
         self.raw_config = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.prediction_config = load_prediction_config(PROJECT_ROOT / self.raw_config["prediction_config"])
-        self.target_tls_id = str(self.raw_config["target_tls_id"])
+        self.cluster_tls_ids = [str(tls_id) for tls_id in self.raw_config["cluster_tls_ids"]]
         self.control_interval_s = int(self.raw_config.get("control_interval_s", 10))
         self.warmup_s = int(self.raw_config.get("warmup_s", 300))
         self.episode_s = int(self.raw_config.get("episode_s", 3600))
         self.reward_weights = dict(self.raw_config.get("reward_weights", {}))
         self.reward_mode = str(reward_mode or self.raw_config.get("reward_mode", "current_pressure_v1"))
-        self._scenario_override_locked = scenario_run_id is not None
         self.use_prediction_features = (
             bool(self.raw_config.get("use_prediction_features", False))
             if use_prediction_features is None
@@ -69,48 +65,45 @@ class SignalControlEnv:
             if use_prediction_reward is None
             else bool(use_prediction_reward)
         )
-        self.scenario_sampling_mode = str(self.raw_config.get("scenario_sampling_mode", "fixed") or "fixed").strip().lower()
-        self._default_scenario_run_id = (scenario_run_id or str(self.raw_config.get("scenario_run_id", ""))).strip()
-        self.scenario_run_id = self._default_scenario_run_id
-        self._scenario_pool = self._load_scenario_pool(self.raw_config.get("scenario_pool", []))
-        self._scenario_sampler = random.Random(int(self.raw_config.get("scenario_sampling_seed", 42)))
+        self.reference_single_tls_id = str(self.raw_config.get("reference_single_tls_id", ""))
+        self.scenario_run_id = (scenario_run_id or str(self.raw_config.get("scenario_run_id", ""))).strip()
         self.scenario_manifest_path = _project_path(self.prediction_config.scenario_manifest_file)
         self.scenario_meta: dict[str, str] | None = None
+
         self.runtime_net_file = _project_path(self.raw_config["net_file"])
         self.runtime_route_template = _project_path(self.raw_config["route_file"])
         self.net_file = self.runtime_net_file
         self.route_file = self.runtime_route_template
-        self.state_builder = PhaseStateBuilder(
-            _project_path(self.raw_config["movement_config"]),
-            self.target_tls_id,
+
+        self.movement_config_path = _project_path(self.raw_config["movement_config"])
+        self.coordination_graph_path = _project_path(self.raw_config["coordination_graph"])
+        if not self.coordination_graph_path.exists():
+            build_tls_coordination_graph(
+                movement_config_path=self.movement_config_path,
+                net_file=self.runtime_net_file,
+                out_path=self.coordination_graph_path,
+                tls_ids=self.cluster_tls_ids,
+            )
+
+        self.state_builder = MultiTLSStateBuilder(
+            self.movement_config_path,
+            self.coordination_graph_path,
+            self.cluster_tls_ids,
             list(self.raw_config.get("prediction_horizons", [5, 10, 15])),
         )
         self.reference_net_file = _project_path(self.raw_config["net_file"])
-        self.reference_green_phases = _green_phase_ids_from_net(
-            self.reference_net_file,
-            self.target_tls_id,
-            float(self.raw_config.get("min_action_green_duration_s", 5.0)),
-        )
-        self.net_green_phases = _green_phase_ids_from_net(
-            self.net_file,
-            self.target_tls_id,
-            float(self.raw_config.get("min_action_green_duration_s", 5.0)),
-        )
-        allowed_green_phases = set(self.net_green_phases)
-        if self.scenario_meta and self.reference_green_phases:
-            allowed_green_phases = allowed_green_phases & set(self.reference_green_phases)
-        if allowed_green_phases:
-            self.state_builder.restrict_legal_green_phases(allowed_green_phases)
-        self.observation_size = self.state_builder.observation_size
-        self.action_count = 1 + len(self.state_builder.legal_green_phases)
-        self.controller = PhaseController(
-            self.target_tls_id,
-            self.state_builder.legal_green_phases,
-            float(self.raw_config.get("min_green_s", 10)),
-            float(self.raw_config.get("max_green_s", 60)),
-            float(self.raw_config.get("yellow_s", 3)),
-            float(self.raw_config.get("all_red_s", 1)),
-        )
+        self.reference_green_phases = {
+            tls_id: _green_phase_ids_from_net(
+                self.reference_net_file,
+                tls_id,
+                float(self.raw_config.get("min_action_green_duration_s", 5.0)),
+            )
+            for tls_id in self.cluster_tls_ids
+        }
+        self.net_green_phases = dict(self.reference_green_phases)
+        self.controllers: dict[str, PhaseController] = {}
+        self.max_action_count = 1 + self.state_builder.max_phase_slots
+        self.local_observation_size = self.state_builder.local_observation_size
         self.sumo_binary = self.sumolib.checkBinary("sumo")
         self.started = False
         self.last_info: dict[str, Any] = {}
@@ -125,13 +118,7 @@ class SignalControlEnv:
 
     def reset(self, seed: int | None = None) -> np.ndarray:
         self.close()
-        if seed is not None:
-            self._scenario_sampler.seed(int(seed))
-        if not self._scenario_override_locked and self.scenario_sampling_mode == "mixed" and self._scenario_pool:
-            selected_run_id = self._sample_scenario_run_id()
-        else:
-            selected_run_id = self._default_scenario_run_id
-        self._configure_active_scenario(selected_run_id)
+        self._configure_active_scenario(self.scenario_run_id)
         cmd = [
             self.sumo_binary,
             "-n",
@@ -161,47 +148,111 @@ class SignalControlEnv:
             self.traci.simulationStep()
             incident_edges = self._apply_scenario_event_controls(float(self.traci.simulation.getTime()))
             self._record_prediction_step(incident_edges)
-        self.controller.reset(self.traci, self.traci.simulation.getTime())
+        current_time = float(self.traci.simulation.getTime())
+        for tls_id, controller in self.controllers.items():
+            controller.reset(self.traci, current_time)
         observation, info = self._observe()
         self.last_info = info
         return observation
 
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
+    def step(self, actions: dict[str, int] | list[int] | np.ndarray) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
+        action_by_tls = self._normalize_actions(actions)
         sim_time = float(self.traci.simulation.getTime())
-        pressure_by_phase = {
-            int(item.get("phase_id")): float(item.get("queue_sum", 0.0)) + float(item.get("arrival_flow_sum", 0.0))
-            for item in self.last_info.get("phase_stats", [])
-        }
-        action_info = self.controller.apply_action(
-            self.traci,
-            int(action),
-            sim_time,
-            pressure_by_phase,
-            step_callback=self._record_prediction_step,
-        )
-        remaining_steps = max(0, self.control_interval_s - int(action_info.get("transition_steps", 0)))
+        decisions: dict[str, dict[str, Any]] = {}
+        transition_schedules: dict[str, list[int]] = {}
+        switch_executed: dict[str, bool] = {}
+
+        for tls_id in self.cluster_tls_ids:
+            controller = self.controllers[tls_id]
+            current_phase = int(self.traci.trafficlight.getPhase(tls_id))
+            elapsed = controller.phase_elapsed(self.traci, sim_time)
+            last_tls_info = dict(self.last_info.get("per_tls", {}).get(tls_id, {}))
+            pressure_by_phase = {
+                int(item.get("phase_id")): float(item.get("queue_sum", 0.0)) + float(item.get("arrival_flow_sum", 0.0))
+                for item in last_tls_info.get("phase_stats", [])
+            }
+            decision = controller.decide_action(
+                int(action_by_tls.get(tls_id, 0)),
+                current_phase,
+                elapsed,
+                pressure_by_phase,
+            )
+            decisions[tls_id] = decision
+            if bool(decision.get("switch_requested")):
+                transition = controller.build_transition_schedule(
+                    self.traci,
+                    current_phase,
+                    int(decision.get("requested_phase", current_phase)),
+                )
+                decisions[tls_id].update(
+                    {
+                        "transition_fallback": bool(transition.get("transition_fallback")),
+                        "transition_program_mismatch": bool(transition.get("transition_program_mismatch")),
+                        "transition_phases": list(transition.get("transition_phases", [])),
+                        "transition_steps": int(transition.get("transition_steps", 0)),
+                    }
+                )
+                transition_schedules[tls_id] = list(transition.get("transition_schedule", []))
+                switch_executed[tls_id] = not bool(transition.get("transition_fallback"))
+            else:
+                switch_executed[tls_id] = False
+
+        max_transition_steps = max((len(schedule) for schedule in transition_schedules.values()), default=0)
+        for substep in range(max_transition_steps):
+            for tls_id, schedule in transition_schedules.items():
+                if substep < len(schedule):
+                    self.traci.trafficlight.setPhase(tls_id, int(schedule[substep]))
+            self.traci.simulationStep()
+            incident_edges = self._apply_scenario_event_controls(float(self.traci.simulation.getTime()))
+            self._record_prediction_step(incident_edges)
+
+        current_time = float(self.traci.simulation.getTime())
+        for tls_id, executed in switch_executed.items():
+            if not executed:
+                continue
+            target_phase = int(decisions[tls_id]["requested_phase"])
+            self.traci.trafficlight.setPhase(tls_id, target_phase)
+            controller = self.controllers[tls_id]
+            controller.last_phase = target_phase
+            controller.phase_started_s = current_time
+            decisions[tls_id]["switch_applied"] = True
+            decisions[tls_id]["current_phase_after"] = target_phase
+
+        remaining_steps = max(0, self.control_interval_s - max_transition_steps)
         for _ in range(remaining_steps):
             if self.traci.simulation.getTime() >= self.episode_s:
                 break
             self.traci.simulationStep()
             incident_edges = self._apply_scenario_event_controls(float(self.traci.simulation.getTime()))
             self._record_prediction_step(incident_edges)
+
         observation, info = self._observe()
-        info["action"] = int(action)
-        info.update(action_info)
-        prediction_by_phase = self._reward_prediction_by_phase()
-        reward, reward_meta = compute_reward(
-            info,
-            bool(action_info.get("switch_applied")),
+        prediction_by_tls = self._reward_prediction_by_tls()
+        rewards_by_tls, reward_meta_by_tls, cluster_reward_meta = compute_multi_tls_rewards(
+            info["per_tls"],
+            self.state_builder.neighbors,
+            switch_executed,
             self.reward_weights,
             reward_mode=self.reward_mode,
             use_prediction_reward=self.use_prediction_reward,
-            prediction_by_phase=prediction_by_phase,
+            prediction_by_tls=prediction_by_tls,
         )
-        info.update(reward_meta)
+        for tls_id in self.cluster_tls_ids:
+            tls_info = info["per_tls"][tls_id]
+            tls_info["action"] = int(action_by_tls[tls_id])
+            tls_info.update(decisions.get(tls_id, {}))
+            tls_info["reward"] = float(rewards_by_tls.get(tls_id, 0.0))
+            tls_info.update(reward_meta_by_tls.get(tls_id, {}))
+        info["cluster_reward_mean"] = float(cluster_reward_meta["mean_reward"])
+        info["mean_coordination_penalty"] = float(cluster_reward_meta["mean_coordination_penalty"])
+        info["reward_mode"] = self.reward_mode
+        info["prediction_reward_enabled"] = bool(self.use_prediction_reward)
+        info["action_by_tls"] = {tls_id: int(action_by_tls[tls_id]) for tls_id in self.cluster_tls_ids}
+        info["switch_count"] = sum(1 for value in switch_executed.values() if value)
+        info["per_tls_reward"] = {tls_id: float(rewards_by_tls[tls_id]) for tls_id in self.cluster_tls_ids}
         done = float(self.traci.simulation.getTime()) >= float(self.episode_s)
         self.last_info = info
-        return observation, reward, done, info
+        return observation, float(cluster_reward_meta["mean_reward"]), done, info
 
     def close(self) -> None:
         if not self.started:
@@ -215,39 +266,63 @@ class SignalControlEnv:
 
     def _observe(self) -> tuple[np.ndarray, dict[str, Any]]:
         sim_time = float(self.traci.simulation.getTime())
-        current_phase = int(self.traci.trafficlight.getPhase(self.target_tls_id))
-        elapsed = self.controller.phase_elapsed(self.traci, sim_time)
-        observation, info = self.state_builder.build(
+        phase_state_by_tls = {}
+        for tls_id, controller in self.controllers.items():
+            current_phase = int(self.traci.trafficlight.getPhase(tls_id))
+            elapsed = controller.phase_elapsed(self.traci, sim_time)
+            phase_state_by_tls[tls_id] = {
+                "current_phase": current_phase,
+                "phase_elapsed_s": elapsed,
+            }
+        prediction_payload_by_tls = self._prediction_phase_payload_by_tls(include_prediction_features=self.use_prediction_features)
+        observation, cluster_info = self.state_builder.build(
             self.traci,
-            current_phase,
-            elapsed,
+            phase_state_by_tls,
             float(self.raw_config.get("max_green_s", 60)),
-            prediction_phase_payload=self._prediction_phase_payload(),
+            prediction_phase_payload_by_tls=prediction_payload_by_tls,
+            include_prediction_features=self.use_prediction_features,
         )
-        info["sim_time_s"] = sim_time
-        info["vehicle_count"] = int(self.traci.vehicle.getIDCount())
-        info["mean_speed_mps"] = _mean_speed(self.traci)
-        info["action_count"] = self.action_count
-        info["observation_size"] = self.observation_size
-        info["use_prediction_features"] = self.use_prediction_features
-        info["prediction_snapshots"] = self._prediction_snapshots
-        info["prediction_fallback_used"] = False
-        info["prediction_ready"] = False
-        info["prediction_latency_ms"] = 0.0
-        info["scenario_run_id"] = self.scenario_run_id
-        info["scenario_id"] = self.scenario_meta.get("scenario_id", "") if self.scenario_meta else ""
-        info["event_type"] = self.scenario_meta.get("event_type", "") if self.scenario_meta else ""
-        info["signal_variant"] = self.scenario_meta.get("signal_variant", "") if self.scenario_meta else ""
-        info["scenario_sampling_mode"] = self.scenario_sampling_mode
-        info["reward_mode"] = self.reward_mode
-        info["prediction_reward_enabled"] = bool(self.use_prediction_reward)
+        info: dict[str, Any] = {
+            "tls_ids": list(self.cluster_tls_ids),
+            "per_tls": cluster_info["per_tls"],
+            "action_masks": cluster_info["action_masks"],
+            "feature_names": cluster_info["feature_names"],
+            "local_observation_size": cluster_info["local_observation_size"],
+            "sim_time_s": sim_time,
+            "vehicle_count": int(self.traci.vehicle.getIDCount()),
+            "mean_speed_mps": _mean_speed(self.traci),
+            "scenario_run_id": self.scenario_run_id,
+            "scenario_id": self.scenario_meta.get("scenario_id", "") if self.scenario_meta else "",
+            "event_type": self.scenario_meta.get("event_type", "") if self.scenario_meta else "",
+            "signal_variant": self.scenario_meta.get("signal_variant", "") if self.scenario_meta else "",
+            "prediction_snapshots": int(self._prediction_snapshots),
+            "prediction_latency_ms": 0.0,
+            "prediction_fallback_used": False,
+            "prediction_ready": False,
+            "prediction_available_tls_count": cluster_info["prediction_available_tls_count"],
+            "max_action_count": int(self.max_action_count),
+        }
         if self.prediction_service is not None:
             latest = self.prediction_service.latest_prediction or {}
             info["prediction_fallback_used"] = bool(latest.get("fallback_used"))
             info["prediction_latency_ms"] = float(latest.get("prediction_latency_ms", 0.0) or 0.0)
-        info["prediction_ready"] = bool(info.get("prediction_available")) and not bool(info.get("prediction_fallback_used"))
-        info["feature_names"] = self.state_builder.feature_names
+        info["prediction_ready"] = bool(info["prediction_available_tls_count"]) and not bool(info["prediction_fallback_used"])
+        info["cluster_queue_sum"] = float(
+            sum(
+                sum(float(item.get("queue_sum", 0.0)) for item in tls_info.get("phase_stats", []))
+                for tls_info in info["per_tls"].values()
+            )
+        )
         return observation, info
+
+    def _normalize_actions(self, actions: dict[str, int] | list[int] | np.ndarray) -> dict[str, int]:
+        if isinstance(actions, dict):
+            return {tls_id: int(actions.get(tls_id, 0)) for tls_id in self.cluster_tls_ids}
+        action_list = list(actions)
+        return {
+            tls_id: int(action_list[index]) if index < len(action_list) else 0
+            for index, tls_id in enumerate(self.cluster_tls_ids)
+        }
 
     def _init_prediction_bridge(self) -> None:
         self.prediction_service = PredictionService(
@@ -259,13 +334,13 @@ class SignalControlEnv:
         )
         self.prediction_collector = MovementRealtimeCollector(
             self.prediction_config,
-            PROJECT_ROOT / "data" / "tmp_rl" / "rl_runtime_movement_aggregates.csv",
-            run_id="rl_runtime",
-            scenario_id="rl_control",
+            PROJECT_ROOT / "data" / "tmp_rl_multi" / "rl_multi_runtime_movement_aggregates.csv",
+            run_id="rl_multi_runtime",
+            scenario_id="rl_multi_control",
             base_demand_factor=self.prediction_config.base_demand_factor,
             project_root=PROJECT_ROOT,
             net_file=self.net_file,
-            movement_config_path=_project_path(self.raw_config["movement_config"]),
+            movement_config_path=self.movement_config_path,
         )
 
     def _reset_prediction_bridge(self) -> None:
@@ -298,37 +373,43 @@ class SignalControlEnv:
             self._prediction_snapshots += 1
             self.prediction_service.update_observation(snapshot)
 
-    def _prediction_phase_payload(self) -> dict[str, Any] | None:
-        if not self.use_prediction_features or self.prediction_service is None:
-            return None
+    def _prediction_phase_payload_by_tls(self, include_prediction_features: bool) -> dict[str, dict[int, dict[str, Any]]]:
+        if not include_prediction_features or self.prediction_service is None:
+            return {}
         latest = self.prediction_service.latest_prediction or {}
         if bool(latest.get("fallback_used")):
-            return None
+            return {}
         payload = self.prediction_service.phase_aggregate_payload()
-        tls_items = [
-            item for item in payload.get("tls", [])
-            if str(item.get("tls_id")) == self.target_tls_id
-        ]
-        if not tls_items:
-            return None
-        return payload
-
-    def _reward_prediction_by_phase(self) -> dict[int, dict[str, Any]] | None:
-        if not self.use_prediction_reward or self.prediction_service is None:
-            return None
-        latest = self.prediction_service.latest_prediction or {}
-        if bool(latest.get("fallback_used")):
-            return None
-        payload = self.prediction_service.phase_aggregate_payload()
+        result: dict[str, dict[int, dict[str, Any]]] = {}
         for tls in payload.get("tls", []):
-            if str(tls.get("tls_id")) != self.target_tls_id:
+            tls_id = str(tls.get("tls_id", ""))
+            if tls_id not in self.cluster_tls_ids:
                 continue
-            return {
+            result[tls_id] = {
                 int(phase.get("phase_id")): phase
                 for phase in tls.get("phases", [])
                 if str(phase.get("phase_id", "")).lstrip("-").isdigit()
             }
-        return None
+        return result
+
+    def _reward_prediction_by_tls(self) -> dict[str, dict[int, dict[str, Any]]]:
+        if not self.use_prediction_reward or self.prediction_service is None:
+            return {}
+        latest = self.prediction_service.latest_prediction or {}
+        if bool(latest.get("fallback_used")):
+            return {}
+        payload = self.prediction_service.phase_aggregate_payload()
+        result: dict[str, dict[int, dict[str, Any]]] = {}
+        for tls in payload.get("tls", []):
+            tls_id = str(tls.get("tls_id", ""))
+            if tls_id not in self.cluster_tls_ids:
+                continue
+            result[tls_id] = {
+                int(phase.get("phase_id")): phase
+                for phase in tls.get("phases", [])
+                if str(phase.get("phase_id", "")).lstrip("-").isdigit()
+            }
+        return result
 
     def _load_scenario_meta(self, run_id: str) -> dict[str, str]:
         if not run_id:
@@ -342,44 +423,6 @@ class SignalControlEnv:
                     return {key: (value or "") for key, value in row.items()}
         raise ValueError(f"scenario run_id not found in manifest: {run_id}")
 
-    def _load_scenario_pool(self, raw_pool: Any) -> list[dict[str, Any]]:
-        pool: list[dict[str, Any]] = []
-        if not isinstance(raw_pool, list):
-            return pool
-        for index, item in enumerate(raw_pool):
-            if isinstance(item, str):
-                run_id = item.strip()
-                weight = 1.0
-            elif isinstance(item, dict):
-                run_id = str(item.get("run_id", "")).strip()
-                weight = _safe_float(item.get("weight"), 1.0)
-            else:
-                continue
-            if weight <= 0:
-                continue
-            pool.append(
-                {
-                    "index": index,
-                    "run_id": run_id,
-                    "weight": float(weight),
-                }
-            )
-        return pool
-
-    def _sample_scenario_run_id(self) -> str:
-        if not self._scenario_pool:
-            return self._default_scenario_run_id
-        total = sum(float(item.get("weight", 0.0)) for item in self._scenario_pool)
-        if total <= 0:
-            return self._default_scenario_run_id
-        pick = self._scenario_sampler.uniform(0.0, total)
-        running = 0.0
-        for item in self._scenario_pool:
-            running += float(item.get("weight", 0.0))
-            if pick <= running:
-                return str(item.get("run_id", "")).strip()
-        return str(self._scenario_pool[-1].get("run_id", "")).strip()
-
     def _configure_active_scenario(self, run_id: str) -> None:
         self.scenario_run_id = (run_id or "").strip()
         self.scenario_meta = self._load_scenario_meta(self.scenario_run_id) if self.scenario_run_id else None
@@ -392,30 +435,42 @@ class SignalControlEnv:
                 self.runtime_route_template,
                 PROJECT_ROOT / "data" / "raw" / "runtime_routes",
                 scale_factor=float(self.prediction_config.base_demand_factor),
-                output_name="rl_runtime.rou.xml",
+                output_name="rl_multi_runtime.rou.xml",
             )
-        self.net_green_phases = _green_phase_ids_from_net(
-            self.net_file,
-            self.target_tls_id,
-            float(self.raw_config.get("min_action_green_duration_s", 5.0)),
-        )
-        allowed_green_phases = set(self.net_green_phases)
-        if self.scenario_meta and self.reference_green_phases:
-            allowed_green_phases = allowed_green_phases & set(self.reference_green_phases)
-        if allowed_green_phases:
-            self.state_builder.restrict_legal_green_phases(allowed_green_phases)
-        else:
-            self.state_builder.restrict_legal_green_phases(set(self.reference_green_phases) or set(self.state_builder.base_legal_green_phases))
-        self.observation_size = self.state_builder.observation_size
-        self.action_count = 1 + len(self.state_builder.legal_green_phases)
-        self.controller = PhaseController(
-            self.target_tls_id,
-            self.state_builder.legal_green_phases,
-            float(self.raw_config.get("min_green_s", 10)),
-            float(self.raw_config.get("max_green_s", 60)),
-            float(self.raw_config.get("yellow_s", 3)),
-            float(self.raw_config.get("all_red_s", 1)),
-        )
+
+        self.net_green_phases = {
+            tls_id: _green_phase_ids_from_net(
+                self.net_file,
+                tls_id,
+                float(self.raw_config.get("min_action_green_duration_s", 5.0)),
+            )
+            for tls_id in self.cluster_tls_ids
+        }
+        for tls_id in self.cluster_tls_ids:
+            allowed = set(self.net_green_phases.get(tls_id, set()))
+            if self.scenario_meta and self.reference_green_phases.get(tls_id):
+                allowed = allowed & set(self.reference_green_phases[tls_id])
+            if allowed:
+                self.state_builder.restrict_legal_green_phases(tls_id, allowed)
+            else:
+                self.state_builder.restrict_legal_green_phases(
+                    tls_id,
+                    set(self.reference_green_phases.get(tls_id, []))
+                    or set(self.state_builder.base_legal_green_phases.get(tls_id, [])),
+                )
+        self.controllers = {
+            tls_id: PhaseController(
+                tls_id,
+                self.state_builder.legal_green_phases.get(tls_id, []),
+                float(self.raw_config.get("min_green_s", 10)),
+                float(self.raw_config.get("max_green_s", 60)),
+                float(self.raw_config.get("yellow_s", 3)),
+                float(self.raw_config.get("all_red_s", 1)),
+            )
+            for tls_id in self.cluster_tls_ids
+        }
+        self.max_action_count = 1 + self.state_builder.max_phase_slots
+        self.local_observation_size = self.state_builder.local_observation_size
         if self.use_prediction_features or self.use_prediction_reward:
             self._init_prediction_bridge()
         else:
@@ -486,7 +541,8 @@ class SignalControlEnv:
         if not self.scenario_meta:
             return []
         return [
-            edge_id for edge_id in str(self.scenario_meta.get("affected_edges", "")).split("|")
+            edge_id
+            for edge_id in str(self.scenario_meta.get("affected_edges", "")).split("|")
             if edge_id
         ]
 
@@ -517,99 +573,11 @@ class SignalControlEnv:
             return False
 
 
-class SumoSignalGymEnv(gym.Env if gym is not None else object):
-    metadata = {"render_modes": []}
-
-    def __init__(
-        self,
-        config_path: str | Path,
-        sim_end: int | None = None,
-        use_prediction_features: bool = False,
-        use_prediction_reward: bool | None = None,
-        reward_mode: str | None = None,
-        scenario_run_id: str | None = None,
-    ):
-        if gym is None or spaces is None:
-            raise RuntimeError(
-                "Gymnasium is required for SB3 DQN training. Install it with: pip install gymnasium"
-            )
-        self.core_env = SignalControlEnv(
-            config_path,
-            use_prediction_features=use_prediction_features,
-            use_prediction_reward=use_prediction_reward,
-            reward_mode=reward_mode,
-            scenario_run_id=scenario_run_id,
-        )
-        if sim_end is not None:
-            self.core_env.episode_s = int(sim_end)
-        self.action_space = spaces.Discrete(self.core_env.action_count)
-        self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=(self.core_env.observation_size,),
-            dtype=np.float32,
-        )
-        self._last_info: dict[str, Any] = {}
-
-    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
-        super().reset(seed=seed)
-        observation = self.core_env.reset(seed=seed)
-        self._last_info = dict(self.core_env.last_info)
-        return observation.astype(np.float32), self._last_info
-
-    def step(self, action: int) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
-        observation, reward, done, info = self.core_env.step(int(action))
-        self._last_info = dict(info)
-        return observation.astype(np.float32), float(reward), bool(done), False, info
-
-    def close(self) -> None:
-        self.core_env.close()
-
-
-def _project_path(value: str | Path) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else PROJECT_ROOT / path
-
-
-def _mean_speed(traci_module: Any) -> float:
-    vehicle_ids = list(traci_module.vehicle.getIDList())
-    if not vehicle_ids:
-        return 0.0
-    speeds = []
-    for vehicle_id in vehicle_ids:
-        try:
-            speeds.append(float(traci_module.vehicle.getSpeed(vehicle_id)))
-        except Exception:
-            continue
-    return float(sum(speeds) / len(speeds)) if speeds else 0.0
-
-
-def _green_phase_ids_from_net(net_file: Path, tls_id: str, min_duration_s: float = 5.0) -> set[int]:
-    try:
-        root = ET.parse(net_file).getroot()
-    except Exception:
-        return set()
-    logic = root.find(f".//tlLogic[@id='{tls_id}']")
-    if logic is None:
-        return set()
-    result = set()
-    for index, phase in enumerate(logic.findall("phase")):
-        state = str(phase.attrib.get("state", ""))
-        duration = float(phase.attrib.get("duration", 0.0))
-        if duration >= float(min_duration_s) and ("g" in state or "G" in state) and "y" not in state:
-            result.add(index)
-    return result
-
-
-def _queue_sum(info: dict[str, Any]) -> float:
-    return float(sum(float(item.get("queue_sum", 0.0)) for item in info.get("phase_stats", [])))
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Smoke test the single-intersection SUMO RL environment.")
-    parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "rl_signal_config.json"))
+    parser = argparse.ArgumentParser(description="Smoke test the multi-intersection SUMO RL environment.")
+    parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "rl_multi_signal_config_v1.json"))
     parser.add_argument("--smoke-test", action="store_true")
-    parser.add_argument("--steps", type=int, default=20)
+    parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--sim-end", type=int, default=None)
     parser.add_argument("--use-prediction", default="false")
     parser.add_argument("--use-prediction-reward", default="")
@@ -617,10 +585,9 @@ def main() -> None:
     parser.add_argument("--scenario-run-id", default="")
     args = parser.parse_args()
     if not args.smoke_test:
-        parser.error("Only --smoke-test is supported for rl.env CLI.")
-    env = SumoSignalGymEnv(
+        parser.error("Only --smoke-test is supported for rl.multi_env CLI.")
+    env = MultiSignalControlEnv(
         args.config,
-        sim_end=args.sim_end,
         use_prediction_features=_parse_bool(args.use_prediction),
         use_prediction_reward=(
             _parse_bool(args.use_prediction_reward)
@@ -630,32 +597,21 @@ def main() -> None:
         reward_mode=(args.reward_mode or "").strip() or None,
         scenario_run_id=(args.scenario_run_id or "").strip() or None,
     )
-    observation, info = env.reset(seed=0)
-    print(f"obs_shape={observation.shape}")
-    print(f"action_count={env.action_space.n}")
-    print(f"legal_green_phases={info.get('legal_green_phases')}")
+    if args.sim_end is not None:
+        env.episode_s = int(args.sim_end)
+    observation = env.reset(seed=42)
+    print(f"obs_shape={observation.shape} tls_ids={env.cluster_tls_ids} local_obs={env.local_observation_size} max_actions={env.max_action_count}")
     try:
-        for step in range(max(0, int(args.steps))):
-            action = step % max(1, env.action_space.n)
-            observation, reward, done, _, info = env.step(action)
+        for step in range(max(1, args.steps)):
+            action_masks = env.last_info.get("action_masks", {})
+            actions = {
+                tls_id: 0 if not any(mask[1:] for mask in [action_masks.get(tls_id, [])]) else 0
+                for tls_id in env.cluster_tls_ids
+            }
+            observation, reward, done, info = env.step(actions)
             print(
-                "step={step} action={action} reward={reward:.4f} queue={queue:.2f} "
-                "switch={switch} phase={phase} transition_fallback={fallback} "
-                "pred={pred} pred_ready={pred_ready} pred_snapshots={snapshots} pred_fallback={pred_fallback} "
-                "future_bonus={future_bonus:.4f}".format(
-                    step=step + 1,
-                    action=action,
-                    reward=reward,
-                    queue=_queue_sum(info),
-                    switch=int(bool(info.get("switch_applied"))),
-                    phase=info.get("current_phase"),
-                    fallback=int(bool(info.get("transition_fallback"))),
-                    pred=int(bool(info.get("prediction_available"))),
-                    pred_ready=int(bool(info.get("prediction_ready"))),
-                    snapshots=int(info.get("prediction_snapshots", 0)),
-                    pred_fallback=int(bool(info.get("prediction_fallback_used"))),
-                    future_bonus=float(info.get("reward_future_bonus", 0.0)),
-                )
+                f"step={step} reward={reward:.4f} queue={info.get('cluster_queue_sum', 0.0):.2f} "
+                f"switches={info.get('switch_count', 0)} pred_ready={int(info.get('prediction_ready', False))}"
             )
             if done:
                 break
@@ -667,15 +623,6 @@ def _parse_bool(value: str | bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        if value in {"", None}:
-            return default
-        return float(value)
-    except (TypeError, ValueError):
-        return default
 
 
 if __name__ == "__main__":

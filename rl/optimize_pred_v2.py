@@ -31,7 +31,9 @@ def optimize_pred_v2(
     report_dir: str | Path,
     artifact_dir: str | Path,
     seed: int,
+    prediction_label: str = "pred_v1",
     smoke_test: bool = False,
+    checkpoint_every: int = 0,
 ) -> dict[str, Any]:
     config_file = _project_path(config_path)
     report_root = _project_path(report_dir)
@@ -40,7 +42,8 @@ def optimize_pred_v2(
     artifact_root.mkdir(parents=True, exist_ok=True)
 
     base_config = json.loads(config_file.read_text(encoding="utf-8"))
-    specs = _round_specs(max(1, min(int(rounds), 5)))
+    label = _safe_name(prediction_label or "pred_v1")
+    specs = _round_specs(max(1, min(int(rounds), 5)), label)
     completed: list[dict[str, Any]] = []
     pred_results: list[tuple[RoundSpec, dict[str, Any]]] = []
 
@@ -73,26 +76,30 @@ def optimize_pred_v2(
         )
 
         train_summary = train_dqn(
-            round_config_path,
-            timesteps,
-            seed,
-            spec.use_prediction,
-            sim_end,
-            artifact_root,
-            smoke_test,
-            device,
-            report_root,
-            spec.name,
+            config_path=round_config_path,
+            timesteps=timesteps,
+            seed=seed,
+            use_prediction=spec.use_prediction,
+            use_prediction_reward=None,
+            sim_end=sim_end,
+            out_dir=artifact_root,
+            smoke_test=smoke_test,
+            device=device,
+            report_dir=report_root,
+            run_name=spec.name,
+            resume_from=None,
+            checkpoint_every=checkpoint_every,
         )
         eval_path = report_root / f"{spec.name}_eval.csv"
         eval_summary = evaluate_policy(
-            round_config_path,
-            "dqn",
-            sim_end,
-            eval_path,
-            seed,
-            train_summary["model_path"],
-            spec.use_prediction,
+            config_path=round_config_path,
+            policy_name="dqn",
+            sim_end=sim_end,
+            out_path=eval_path,
+            seed=seed,
+            model_path=train_summary["model_path"],
+            use_prediction=spec.use_prediction,
+            use_prediction_reward=None,
         )
         eval_metrics = _metrics_from_eval_csv(eval_path)
         row = {
@@ -127,6 +134,8 @@ def optimize_pred_v2(
         "timesteps": int(timesteps),
         "sim_end": int(sim_end),
         "device": device,
+        "prediction_label": label,
+        "checkpoint_every": int(checkpoint_every),
         "report_dir": str(report_root),
         "artifact_dir": str(artifact_root),
         "best_pred_round": best_pred.get("round", "") if best_pred else "",
@@ -142,21 +151,22 @@ def optimize_pred_v2(
     return summary
 
 
-def _round_specs(rounds: int) -> list[RoundSpec]:
+def _round_specs(rounds: int, prediction_label: str = "pred_v1") -> list[RoundSpec]:
+    label = _safe_name(prediction_label or "pred_v1")
     base = [
-        RoundSpec(name="pred_v2_long_baseline", use_prediction=True),
+        RoundSpec(name=f"{label}_long_baseline", use_prediction=True),
         RoundSpec(
-            name="pred_v2_low_switch_penalty",
+            name=f"{label}_low_switch_penalty",
             use_prediction=True,
             reward_updates={"switch": 0.01},
         ),
         RoundSpec(
-            name="pred_v2_pressure_boost",
+            name=f"{label}_pressure_boost",
             use_prediction=True,
             reward_updates={"queue": 1.2, "pressure": 0.8, "switch": 0.02},
         ),
         RoundSpec(
-            name="pred_v2_explore_more",
+            name=f"{label}_explore_more",
             use_prediction=True,
             reward_updates={"switch": 0.02},
             sb3_updates={"exploration_fraction": 0.55, "exploration_final_eps": 0.08},
@@ -262,7 +272,7 @@ def _write_summary_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
         "eval_prediction_fallback_share",
     ]
     lines = [
-        "# DQN-pred-v2 Sweep Summary",
+        "# DQN Prediction-Enhanced Sweep Summary",
         "",
         "| " + " | ".join(headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
@@ -275,6 +285,14 @@ def _write_summary_markdown(path: Path, rows: list[dict[str, Any]]) -> None:
 def _project_path(value: str | Path) -> Path:
     path = Path(value)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _safe_name(value: str) -> str:
+    cleaned = []
+    for char in str(value).strip():
+        cleaned.append(char if char.isalnum() or char in {"_", "-"} else "_")
+    result = "".join(cleaned).strip("_")
+    return result or "pred_v1"
 
 
 def _float(value: object, default: float = 0.0) -> float:
@@ -291,15 +309,17 @@ def _mean(values: list[float]) -> float:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a small DQN-pred-v2 optimization sweep.")
+    parser = argparse.ArgumentParser(description="Run a DQN prediction-enhanced optimization sweep.")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "rl_signal_config.json"))
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--timesteps", type=int, default=10000)
     parser.add_argument("--sim-end", type=int, default=1800)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
-    parser.add_argument("--report-dir", default=str(PROJECT_ROOT / "reports" / "rl_signal_control" / "pred_v2_sweep"))
-    parser.add_argument("--artifact-dir", default=str(PROJECT_ROOT / "models" / "artifacts_rl" / "pred_v2_sweep"))
+    parser.add_argument("--report-dir", default=str(PROJECT_ROOT / "reports" / "rl_signal_control" / "pred_v1_sweep"))
+    parser.add_argument("--artifact-dir", default=str(PROJECT_ROOT / "models" / "artifacts_rl" / "pred_v1_sweep"))
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--prediction-label", default="pred_v1")
+    parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
     summary = optimize_pred_v2(
@@ -311,7 +331,9 @@ def main() -> None:
         args.report_dir,
         args.artifact_dir,
         args.seed,
+        args.prediction_label,
         args.smoke_test,
+        args.checkpoint_every,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 

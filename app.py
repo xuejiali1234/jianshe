@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import csv
 import asyncio
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -327,6 +328,29 @@ async def get_prediction_phase_aggregate():
 @app.get("/api/prediction/scenario-runs")
 async def get_prediction_scenario_runs():
     return prediction_service.scenario_runs_payload()
+
+@app.get("/api/rl/control-summary")
+async def get_rl_control_summary():
+    candidates = [
+        PROJECT_ROOT / "reports" / "rl_signal_control" / "full_v3_pred_control_v1" / "policy_comparison_1800.csv",
+        PROJECT_ROOT / "reports" / "rl_signal_control" / "full_v3_pred_control" / "policy_comparison_1800.csv",
+        PROJECT_ROOT / "reports" / "rl_signal_control" / "policy_comparison_1800.csv",
+    ]
+    selected_path = next((path for path in candidates if path.exists()), None)
+    if selected_path is None:
+        return {"status": "ok", "rows": [], "source_file": None}
+
+    rows = []
+    with selected_path.open(newline="", encoding="utf-8") as fp:
+        for row in csv.DictReader(fp):
+            rows.append(row)
+    return {
+        "status": "ok",
+        "rows": rows,
+        "source_file": str(selected_path.relative_to(PROJECT_ROOT)),
+        "preferred_policy": "DQN-pred-v1",
+        "stable_prediction_model": prediction_service.active_model,
+    }
 
 @app.post("/api/prediction/active-model")
 async def set_active_prediction_model(req: PredictionModelSwitchRequest):
