@@ -254,6 +254,65 @@ class MultiSignalControlEnv:
         self.last_info = info
         return observation, float(cluster_reward_meta["mean_reward"]), done, info
 
+    def advance_without_control(self) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
+        phase_change_counts = {tls_id: 0 for tls_id in self.cluster_tls_ids}
+        previous_phases = {
+            tls_id: int(self.traci.trafficlight.getPhase(tls_id))
+            for tls_id in self.cluster_tls_ids
+        }
+
+        for _ in range(self.control_interval_s):
+            if float(self.traci.simulation.getTime()) >= float(self.episode_s):
+                break
+            self.traci.simulationStep()
+            incident_edges = self._apply_scenario_event_controls(float(self.traci.simulation.getTime()))
+            self._record_prediction_step(incident_edges)
+            for tls_id in self.cluster_tls_ids:
+                current_phase = int(self.traci.trafficlight.getPhase(tls_id))
+                if current_phase != previous_phases[tls_id]:
+                    phase_change_counts[tls_id] += 1
+                    previous_phases[tls_id] = current_phase
+
+        observation, info = self._observe()
+        switch_applied_by_tls = {
+            tls_id: bool(phase_change_counts.get(tls_id, 0) > 0)
+            for tls_id in self.cluster_tls_ids
+        }
+        prediction_by_tls = self._reward_prediction_by_tls()
+        rewards_by_tls, reward_meta_by_tls, cluster_reward_meta = compute_multi_tls_rewards(
+            info["per_tls"],
+            self.state_builder.neighbors,
+            switch_applied_by_tls,
+            self.reward_weights,
+            reward_mode=self.reward_mode,
+            use_prediction_reward=self.use_prediction_reward,
+            prediction_by_tls=prediction_by_tls,
+        )
+        for tls_id in self.cluster_tls_ids:
+            tls_info = info["per_tls"][tls_id]
+            tls_info["action"] = 0
+            tls_info["switch_applied"] = bool(switch_applied_by_tls.get(tls_id, False))
+            tls_info["switch_count_step"] = int(phase_change_counts.get(tls_id, 0))
+            tls_info["reward"] = float(rewards_by_tls.get(tls_id, 0.0))
+            tls_info["transition_fallback"] = False
+            tls_info["transition_program_mismatch"] = False
+            tls_info["current_phase_after"] = int(tls_info.get("current_phase", -1))
+            tls_info.update(reward_meta_by_tls.get(tls_id, {}))
+        info["cluster_reward_mean"] = float(cluster_reward_meta["mean_reward"])
+        info["mean_coordination_penalty"] = float(cluster_reward_meta["mean_coordination_penalty"])
+        info["reward_mode"] = self.reward_mode
+        info["prediction_reward_enabled"] = bool(self.use_prediction_reward)
+        info["action_by_tls"] = {tls_id: 0 for tls_id in self.cluster_tls_ids}
+        info["switch_count"] = sum(1 for value in switch_applied_by_tls.values() if value)
+        info["switch_count_step_by_tls"] = {
+            tls_id: int(phase_change_counts.get(tls_id, 0))
+            for tls_id in self.cluster_tls_ids
+        }
+        info["per_tls_reward"] = {tls_id: float(rewards_by_tls[tls_id]) for tls_id in self.cluster_tls_ids}
+        done = float(self.traci.simulation.getTime()) >= float(self.episode_s)
+        self.last_info = info
+        return observation, float(cluster_reward_meta["mean_reward"]), done, info
+
     def close(self) -> None:
         if not self.started:
             return

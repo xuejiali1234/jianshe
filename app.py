@@ -111,11 +111,318 @@ from statsmodels.tsa.holtwinters import ExponentialSmoothing
 # Global incidents store
 active_incidents = {}
 auto_incident_tracker = {} # edge_id -> continuous_steps
+manual_incident_vehicle_bindings = {}
+manual_incident_lane_controls = {}
+manual_incident_speed_controls = {}
+MANUAL_VSL_FACTOR = 0.25
 
 class IncidentRequest(BaseModel):
     road_name: str
+    edge_id: str | None = None
+    event_type: str | None = None
     desc: str
     action: str = "create" # "create" or "resolve"
+
+
+def _net_has_edge(edge_id: str) -> bool:
+    try:
+        net_obj.getEdge(edge_id)
+        return True
+    except Exception:
+        return False
+
+
+def _collect_manual_incidents():
+    return {
+        inc_id: incident
+        for inc_id, incident in active_incidents.items()
+        if incident.get("source") == "manual" and incident.get("active", True)
+    }
+
+
+def _restore_manual_incident_vehicle(incident_id: str):
+    binding = manual_incident_vehicle_bindings.pop(incident_id, None)
+    if not binding:
+        return
+    vehicle_id = str(binding.get("vehicle_id", "")).strip()
+    if not vehicle_id:
+        return
+    try:
+        if vehicle_id not in traci.vehicle.getIDList():
+            return
+        if binding.get("spawned"):
+            try:
+                traci.vehicle.remove(vehicle_id)
+            except Exception:
+                pass
+            return
+        traci.vehicle.setSpeed(vehicle_id, -1)
+        traci.vehicle.setSpeedMode(vehicle_id, int(binding.get("speed_mode", 31)))
+        lane_change_mode = binding.get("lane_change_mode")
+        if lane_change_mode is not None:
+            traci.vehicle.setLaneChangeMode(vehicle_id, int(lane_change_mode))
+        color = binding.get("color")
+        if color is not None:
+            traci.vehicle.setColor(vehicle_id, tuple(color))
+    except Exception:
+        pass
+
+
+def _restore_manual_incident_lane_control(incident_id: str):
+    binding = manual_incident_lane_controls.pop(incident_id, None)
+    if not binding:
+        return
+    for lane_id, original_disallowed in binding.get("lanes", {}).items():
+        try:
+            if lane_id in traci.lane.getIDList():
+                traci.lane.setDisallowed(lane_id, list(original_disallowed))
+        except Exception:
+            pass
+
+
+def _restore_manual_incident_speed_control(incident_id: str):
+    binding = manual_incident_speed_controls.pop(incident_id, None)
+    if not binding:
+        return
+    for lane_id, original_speed in binding.get("lanes", {}).items():
+        try:
+            if lane_id in traci.lane.getIDList():
+                traci.lane.setMaxSpeed(lane_id, float(original_speed))
+        except Exception:
+            pass
+
+
+def _restore_all_manual_incident_controls():
+    for incident_id in list(manual_incident_vehicle_bindings.keys()):
+        _restore_manual_incident_vehicle(incident_id)
+    for incident_id in list(manual_incident_lane_controls.keys()):
+        _restore_manual_incident_lane_control(incident_id)
+    for incident_id in list(manual_incident_speed_controls.keys()):
+        _restore_manual_incident_speed_control(incident_id)
+
+
+def _spawn_manual_incident_vehicle(incident_id: str, incident: dict):
+    edge_id = str(incident.get("edge_id", "")).strip()
+    if not edge_id or not _net_has_edge(edge_id):
+        return None
+    edge = net_obj.getEdge(edge_id)
+    lanes = [lane for lane in edge.getLanes() if lane.getLength() > 12]
+    if not lanes:
+        lanes = list(edge.getLanes())
+    if not lanes:
+        return None
+    lane = lanes[min(len(lanes) // 2, len(lanes) - 1)]
+    lane_id = lane.getID()
+    lane_index = lane.getIndex() if hasattr(lane, "getIndex") else max(0, len(lanes) // 2)
+    lane_length = max(float(lane.getLength()), 1.0)
+    pos = min(max(8.0, lane_length * 0.45), max(8.0, lane_length - 8.0))
+
+    route_edges = [edge_id]
+    try:
+        outgoing = list(lane.getOutgoing() or [])
+    except Exception:
+        outgoing = []
+    for connection in outgoing:
+        try:
+            to_lane = connection.getTo()
+            to_edge = to_lane.getEdge() if hasattr(to_lane, "getEdge") else None
+            to_edge_id = to_edge.getID() if to_edge is not None else ""
+            if to_edge_id and not to_edge_id.startswith(":"):
+                route_edges.append(to_edge_id)
+                break
+        except Exception:
+            continue
+
+    route_id = f"manualIncidentRoute.{incident_id[:8]}"
+    vehicle_id = f"manualIncident.{incident_id[:8]}"
+    try:
+        if route_id not in traci.route.getIDList():
+            traci.route.add(route_id, route_edges)
+    except Exception:
+        try:
+            traci.route.add(route_id, [edge_id])
+        except Exception:
+            return None
+
+    try:
+        traci.vehicle.add(
+            vehicle_id,
+            route_id,
+            "DEFAULT_VEHTYPE",
+            "now",
+            str(lane_index),
+            str(pos),
+            "0",
+        )
+    except Exception:
+        return None
+
+    color = (255, 80, 80, 255)
+    try:
+        traci.vehicle.moveTo(vehicle_id, lane_id, pos)
+    except Exception:
+        pass
+    try:
+        traci.vehicle.setLaneChangeMode(vehicle_id, 0)
+    except Exception:
+        pass
+    try:
+        traci.vehicle.setSpeedMode(vehicle_id, 0)
+        traci.vehicle.setSpeed(vehicle_id, 0.0)
+    except Exception:
+        pass
+    try:
+        traci.vehicle.setColor(vehicle_id, color)
+    except Exception:
+        pass
+
+    binding = {
+        "vehicle_id": vehicle_id,
+        "spawned": True,
+        "lane_id": lane_id,
+        "lane_index": lane_index,
+        "pos": pos,
+        "color": color,
+        "speed_mode": 31,
+        "lane_change_mode": 1621,
+    }
+    manual_incident_vehicle_bindings[incident_id] = binding
+    return binding
+
+
+def _apply_manual_incident_lane_closure(incident_id: str, incident: dict):
+    edge_id = str(incident.get("edge_id", "")).strip()
+    if not edge_id or not _net_has_edge(edge_id):
+        return False
+    edge = net_obj.getEdge(edge_id)
+    binding = manual_incident_lane_controls.get(incident_id)
+    if not binding:
+        lanes = {}
+        for lane in edge.getLanes():
+            lane_id = lane.getID()
+            try:
+                original_disallowed = tuple(traci.lane.getDisallowed(lane_id))
+            except Exception:
+                original_disallowed = tuple()
+            lanes[lane_id] = original_disallowed
+        binding = {"lanes": lanes}
+        manual_incident_lane_controls[incident_id] = binding
+
+    for lane_id, original_disallowed in binding.get("lanes", {}).items():
+        try:
+            current = set(traci.lane.getDisallowed(lane_id))
+            current.add("passenger")
+            traci.lane.setDisallowed(lane_id, list(current))
+        except Exception:
+            pass
+
+    pos_base = str(incident.get("pos_base") or f"📍 {incident.get('road_name', '')}")
+    incident["desc"] = f"{pos_base}<br/>该路段已封停：已有车辆可驶离，后续 passenger 车辆禁止进入"
+    return True
+
+
+def _apply_manual_incident_speed_limit(incident_id: str, incident: dict):
+    edge_id = str(incident.get("edge_id", "")).strip()
+    if not edge_id or not _net_has_edge(edge_id):
+        return False
+    edge = net_obj.getEdge(edge_id)
+    binding = manual_incident_speed_controls.get(incident_id)
+    if not binding:
+        lanes = {}
+        for lane in edge.getLanes():
+            lane_id = lane.getID()
+            try:
+                original_speed = float(traci.lane.getMaxSpeed(lane_id))
+            except Exception:
+                original_speed = float(lane.getSpeed() if hasattr(lane, "getSpeed") else 13.89)
+            lanes[lane_id] = original_speed
+        binding = {"lanes": lanes}
+        manual_incident_speed_controls[incident_id] = binding
+
+    for lane_id, original_speed in binding.get("lanes", {}).items():
+        try:
+            traci.lane.setMaxSpeed(lane_id, max(0.1, float(original_speed) * MANUAL_VSL_FACTOR))
+        except Exception:
+            pass
+
+    pos_base = str(incident.get("pos_base") or f"📍 {incident.get('road_name', '')}")
+    incident["desc"] = f"{pos_base}<br/>该路段已限速：最高速度降至基准速度的 {int(MANUAL_VSL_FACTOR * 100)}%"
+    incident["incident_speed_factor"] = MANUAL_VSL_FACTOR
+    return True
+
+
+def _apply_manual_incident_controls():
+    active_manual_incidents = _collect_manual_incidents()
+    active_ids = set(active_manual_incidents.keys())
+    for incident_id in list(manual_incident_vehicle_bindings.keys()):
+        if incident_id not in active_ids:
+            _restore_manual_incident_vehicle(incident_id)
+    for incident_id in list(manual_incident_lane_controls.keys()):
+        if incident_id not in active_ids:
+            _restore_manual_incident_lane_control(incident_id)
+    for incident_id in list(manual_incident_speed_controls.keys()):
+        if incident_id not in active_ids:
+            _restore_manual_incident_speed_control(incident_id)
+
+    affected_edges = set()
+    for incident_id, incident in active_manual_incidents.items():
+        edge_id = str(incident.get("edge_id", "")).strip()
+        if not edge_id or not _net_has_edge(edge_id):
+            continue
+        affected_edges.add(edge_id)
+        requested_event_type = str(incident.get("requested_event_type", "")).strip() or "stopped_vehicle"
+        if requested_event_type == "closure":
+            _restore_manual_incident_vehicle(incident_id)
+            _restore_manual_incident_speed_control(incident_id)
+            _apply_manual_incident_lane_closure(incident_id, incident)
+            continue
+        if requested_event_type == "vsl":
+            _restore_manual_incident_vehicle(incident_id)
+            _restore_manual_incident_lane_control(incident_id)
+            _apply_manual_incident_speed_limit(incident_id, incident)
+            continue
+
+        _restore_manual_incident_lane_control(incident_id)
+        _restore_manual_incident_speed_control(incident_id)
+        pos_base = str(incident.get("pos_base") or f"📍 {incident.get('road_name', '')}")
+        binding = manual_incident_vehicle_bindings.get(incident_id)
+        vehicle_id = str(binding.get("vehicle_id", "")).strip() if binding else ""
+        if not vehicle_id or vehicle_id not in traci.vehicle.getIDList():
+            binding = _spawn_manual_incident_vehicle(incident_id, incident)
+            vehicle_id = str(binding.get("vehicle_id", "")).strip() if binding else ""
+        if not vehicle_id:
+            incident["desc"] = f"{pos_base}<br/>无法在该路段生成事故车"
+            continue
+        try:
+            if binding:
+                lane_id = str(binding.get("lane_id", "")).strip()
+                lane_pos = float(binding.get("pos", 0.0))
+                if lane_id:
+                    try:
+                        traci.vehicle.moveTo(vehicle_id, lane_id, lane_pos)
+                    except Exception:
+                        pass
+                try:
+                    traci.vehicle.setLaneChangeMode(vehicle_id, 0)
+                except Exception:
+                    pass
+            traci.vehicle.setSpeedMode(vehicle_id, 0)
+            traci.vehicle.setSpeed(vehicle_id, 0.0)
+            traci.vehicle.setColor(vehicle_id, (255, 80, 80, 255))
+        except Exception:
+            pass
+        try:
+            x, y = traci.vehicle.getPosition(vehicle_id)
+            lon_wgs, lat_wgs = net_obj.convertXY2LonLat(x, y)
+            glon, glat = wgs84_to_gcj02(lon_wgs, lat_wgs)
+            incident["lnglat"] = [glon, glat]
+        except Exception:
+            pass
+        incident["desc"] = (
+            f"{pos_base}<br/>"
+            f"事故车 {vehicle_id} 已占道静止，后续车辆仍可继续进入"
+        )
+    return affected_edges
 
 def run_holtwinters_forecast(recent_speeds):
     if len(recent_speeds) < 18:
@@ -260,6 +567,7 @@ async def get_network():
                         dirs = list(set([c.getDirection() for c in outgoing]))
                 
                 lanes.append({                    "edgeId": edge.getID(),                    "shape": lonlat_shape,
+                    "roadName": edge.getName() or "",
                     "isInternal": is_internal,
                     "dirs": dirs
                 })
@@ -271,23 +579,48 @@ async def get_network():
 async def handle_manual_incident(req: IncidentRequest):
     global active_incidents
     try:
-        # Find an edge with the specified Chinese name
         target_edge = None
-        for edge in net_obj.getEdges():
-            name = edge.getName()
-            if name and req.road_name in name:
-                target_edge = edge
-                break
+        requested_edge_id = str(req.edge_id or "").strip()
+        if requested_edge_id and _net_has_edge(requested_edge_id):
+            target_edge = net_obj.getEdge(requested_edge_id)
+        else:
+            # Find an edge with the specified Chinese name
+            for edge in net_obj.getEdges():
+                name = edge.getName()
+                if name and req.road_name in name:
+                    target_edge = edge
+                    break
                 
         if not target_edge:
             return {"status": "error", "message": f"未找到名为 '{req.road_name}' 的道路"}
             
         if req.action == "resolve":
             # Remove all manual incidents for this road
-            to_remove = [inc_id for inc_id, v in active_incidents.items() if v["source"] == "manual" and v["road_name"] == req.road_name]
+            target_edge_id = target_edge.getID()
+            to_remove = [
+                inc_id for inc_id, v in active_incidents.items()
+                if v["source"] == "manual" and str(v.get("edge_id", "")) == target_edge_id
+            ]
+            for r in to_remove:
+                _restore_manual_incident_vehicle(r)
+                _restore_manual_incident_lane_control(r)
+                _restore_manual_incident_speed_control(r)
             for r in to_remove:
                 active_incidents.pop(r, None)
             return {"status": "ok", "message": "已解除告警"}
+
+        target_edge_id = target_edge.getID()
+        existing_ids = [
+            inc_id for inc_id, incident in active_incidents.items()
+            if incident.get("source") == "manual"
+            and str(incident.get("edge_id", "")) == target_edge_id
+            and incident.get("active", True)
+        ]
+        for existing_id in existing_ids:
+            _restore_manual_incident_vehicle(existing_id)
+            _restore_manual_incident_lane_control(existing_id)
+            _restore_manual_incident_speed_control(existing_id)
+            active_incidents.pop(existing_id, None)
 
         # Create new incident
         # get middle coordinate
@@ -299,15 +632,37 @@ async def handle_manual_incident(req: IncidentRequest):
         lon_wgs, lat_wgs = net_obj.convertXY2LonLat(mx, my)
         lon, lat = wgs84_to_gcj02(lon_wgs, lat_wgs)
         
+        requested_event_type = str(req.event_type or "").strip() or "stopped_vehicle"
+        if requested_event_type == "closure":
+            incident_event_type = "incident_closure"
+            incident_policy = "manual_edge_passenger_closure"
+            default_desc = "正在实施事故封停"
+        elif requested_event_type == "vsl":
+            incident_event_type = "vsl_speed_drop"
+            incident_policy = "manual_edge_speed_limit"
+            default_desc = "正在实施道路限速"
+        else:
+            requested_event_type = "stopped_vehicle"
+            incident_event_type = "stopped_vehicle_incident"
+            incident_policy = "manual_spawned_vehicle_blocking"
+            default_desc = "正在生成事故车"
+
         inc_id = str(uuid.uuid4())
         active_incidents[inc_id] = {
             "id": inc_id,
-            "road_name": req.road_name,
-            "desc": req.desc,
+            "road_name": target_edge.getName() or req.road_name or target_edge_id,
+            "desc": req.desc or default_desc,
             "lnglat": [lon, lat],
+            "edge_id": target_edge_id,
+            "requested_event_type": requested_event_type,
             "source": "manual",
-            "active": True
+            "active": True,
+            "event_type": incident_event_type,
+            "event_policy": incident_policy,
+            "pos_base": f"📍 {target_edge.getName() or req.road_name or target_edge_id}",
         }
+        if requested_event_type == "vsl":
+            active_incidents[inc_id]["incident_speed_factor"] = MANUAL_VSL_FACTOR
         
         return {"status": "ok", "incident_id": inc_id}
     except Exception as e:
@@ -511,11 +866,14 @@ async def sumo_simulation_task():
                     active_incidents.pop(inc_id, None)
             # ---------------------------------------------------------
 
+            manual_incident_edges = _apply_manual_incident_controls()
+
             incident_edges = {
                 inc_id.replace("auto-", "", 1)
                 for inc_id in active_incidents.keys()
                 if inc_id.startswith("auto-")
             }
+            incident_edges |= manual_incident_edges
             edge_snapshot = edge_collector.record_step(
                 traci,
                 step,
@@ -623,11 +981,13 @@ async def sumo_simulation_task():
             # Control the simulation speed (e.g., 0.1s per step is slower for UI readability)
             await asyncio.sleep(0.15)
             
+        _restore_all_manual_incident_controls()
         traci.close()
         print("Simulation Finished.")
     except Exception as e:
         print(f"Simulation Error: {e}")
         try:
+            _restore_all_manual_incident_controls()
             traci.close()
         except:
             pass

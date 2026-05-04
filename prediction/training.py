@@ -621,6 +621,7 @@ def train_torch_model(
     model.to(device)
     train_ds = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
     train_loader = DataLoader(train_ds, batch_size=min(64, len(train_ds)), shuffle=True)
+    batches_per_epoch = max(len(train_loader), 1)
     criterion = nn.HuberLoss()
     target_weights = (
         build_output_target_weights(dataset, device)
@@ -683,6 +684,7 @@ def train_torch_model(
         loss_history.append(
             {
                 "epoch": int(epoch),
+                "update_step": int(epoch * batches_per_epoch),
                 "train_loss": round(float(train_loss), 8),
                 "val_loss": round(float(val_loss), 8),
                 "best_val_loss": round(float(best_val), 8),
@@ -983,7 +985,7 @@ def write_loss_history_csv(
     if not history:
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["model", "epoch", "train_loss", "val_loss", "best_val_loss", "is_best"]
+    fieldnames = ["model", "epoch", "update_step", "train_loss", "val_loss", "best_val_loss", "is_best"]
     with output_path.open("w", newline="", encoding="utf-8") as fp:
         writer = csv.DictWriter(fp, fieldnames=fieldnames)
         writer.writeheader()
@@ -999,24 +1001,56 @@ def plot_single_training_loss_curve(
     if not history:
         return
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    epochs = [int(row["epoch"]) for row in history]
+    x_values = [int(row["epoch"]) for row in history]
     train_loss = [float(row["train_loss"]) for row in history]
     val_loss = [float(row["val_loss"]) for row in history]
-    best_epochs = [int(row["epoch"]) for row in history if row.get("is_best")]
-    best_epoch = best_epochs[-1] if best_epochs else epochs[-1]
+    first_epoch = x_values[0]
+    last_epoch = x_values[-1]
+    y_min = min(min(train_loss), min(val_loss))
+    y_max = max(max(train_loss), max(val_loss))
 
-    plt.figure(figsize=(8, 4.5))
-    plt.plot(epochs, train_loss, label="train loss", linewidth=2.0)
-    plt.plot(epochs, val_loss, label="val loss", linewidth=2.0)
-    plt.axvline(best_epoch, color="#d62728", linestyle="--", linewidth=1.2, label=f"best epoch {best_epoch}")
-    plt.title(f"{model_name} Training Loss")
-    plt.xlabel("epoch")
-    plt.ylabel("Huber loss")
-    plt.grid(True, alpha=0.25)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    # Keep axis ends aligned with visible tick ends and avoid auto padding.
+    x_ticks = np.array([first_epoch, 30, 60, 90, 120, last_epoch], dtype=float)
+    y_tick_count = 5
+    y_start = math.floor(y_min * 1000.0) / 1000.0
+    y_end = math.ceil(y_max * 1000.0) / 1000.0
+    y_ticks = np.linspace(y_start, y_end, y_tick_count)
+
+    with plt.rc_context(
+        {
+            "font.family": "Times New Roman",
+            "font.size": 22,
+            "axes.labelsize": 24,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
+            "legend.fontsize": 22,
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(8, 4.5), facecolor="white")
+        ax.set_facecolor("white")
+        ax.plot(x_values, train_loss, label="train loss", linewidth=2.0, color="#1f77b4")
+        ax.plot(x_values, val_loss, label="val loss", linewidth=2.0, color="#ff7f0e")
+
+        ax.set_xlabel("epoch", fontname="Times New Roman")
+        ax.set_ylabel("Huber loss", fontname="Times New Roman")
+
+        ax.set_xlim(float(x_ticks[0]), float(x_ticks[-1]))
+        ax.set_ylim(float(y_ticks[0]), float(y_ticks[-1]))
+        ax.set_xticks(x_ticks)
+        ax.set_yticks(y_ticks)
+        ax.margins(x=0.0, y=0.0)
+
+        ax.tick_params(direction="in", length=4.0, width=0.8, colors="black")
+        for spine in ax.spines.values():
+            spine.set_color("black")
+            spine.set_linewidth(0.8)
+
+        ax.grid(False)
+        ax.legend(loc="upper right", frameon=False, borderaxespad=0.6)
+
+        fig.savefig(output_path, dpi=150, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_torch_training_loss_curves(
@@ -1031,16 +1065,17 @@ def plot_torch_training_loss_curves(
     if len(available) == 1:
         axes = [axes]
     for ax, (model_name, history) in zip(axes, available.items()):
-        epochs = [int(row["epoch"]) for row in history]
+        x_values = [int(row["epoch"]) for row in history]
         train_loss = [float(row["train_loss"]) for row in history]
         val_loss = [float(row["val_loss"]) for row in history]
-        best_epochs = [int(row["epoch"]) for row in history if row.get("is_best")]
-        best_epoch = best_epochs[-1] if best_epochs else epochs[-1]
-        ax.plot(epochs, train_loss, label="train", linewidth=1.8)
-        ax.plot(epochs, val_loss, label="val", linewidth=1.8)
-        ax.axvline(best_epoch, color="#d62728", linestyle="--", linewidth=1.0)
+        best_points = [int(row["epoch"]) for row in history if row.get("is_best")]
+        best_point = best_points[-1] if best_points else x_values[-1]
+        x_label = "epoch"
+        ax.plot(x_values, train_loss, label="train", linewidth=1.8)
+        ax.plot(x_values, val_loss, label="val", linewidth=1.8)
+        ax.axvline(best_point, color="#d62728", linestyle="--", linewidth=1.0)
         ax.set_title(model_name)
-        ax.set_xlabel("epoch")
+        ax.set_xlabel(x_label)
         ax.set_ylabel("Huber loss")
         ax.grid(True, alpha=0.25)
         ax.legend()
@@ -1181,6 +1216,24 @@ def plot_continuous_high_flow_series(
         for name, pred in predictions.items()
     }
 
+    interval_seconds = 60.0
+    if len(group_positions) >= 2:
+        try:
+            ts0 = datetime.fromisoformat(str(timestamps[group_positions[0]]))
+            ts1 = datetime.fromisoformat(str(timestamps[group_positions[1]]))
+            inferred_interval = abs((ts1 - ts0).total_seconds())
+            if inferred_interval > 0:
+                interval_seconds = inferred_interval
+        except ValueError:
+            interval_seconds = 60.0
+
+    y_label = f"{target_name} per 60s"
+    if target_name == "arrival_flow":
+        flow_scale = 3600.0 / interval_seconds
+        true_series = true_series * flow_scale
+        series_by_model = {name: series * flow_scale for name, series in series_by_model.items()}
+        y_label = "Traffic flow q (veh/h)"
+
     labels = []
     for pos in group_positions:
         raw_ts = str(timestamps[pos])
@@ -1190,25 +1243,68 @@ def plot_continuous_high_flow_series(
             labels.append(raw_ts)
 
     x = np.arange(len(group_positions))
-    plt.figure(figsize=(11, 5))
-    plt.plot(x, true_series, label="true", linewidth=2.2, color="#1f77b4")
-    for name, series in series_by_model.items():
-        plt.plot(x, series, label=name, linestyle="--", linewidth=1.8)
+    all_series = [true_series, *series_by_model.values()]
+    y_min = min(float(np.min(series)) for series in all_series)
+    y_max = max(float(np.max(series)) for series in all_series)
+    y_start = math.floor(y_min)
+    y_end = math.ceil(y_max)
+    if y_end <= y_start:
+        y_end = y_start + 1
+    y_ticks = np.linspace(y_start, y_end, 5)
 
-    tick_step = max(1, len(x) // 10)
-    plt.xticks(x[::tick_step], labels[::tick_step], rotation=0)
-    plt.xlabel("time")
-    plt.ylabel(f"{target_name} per 60s")
-    plt.title(
-        "Continuous Rolling Forecast: "
-        f"TLS {selected_tls} / incoming {selected_incoming_edge} / {target_name} "
-        f"(1-step ahead, {len(selected_cols)} movements, run={selected_run_id})"
-    )
-    plt.grid(True, alpha=0.25)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    tick_count = min(6, len(x))
+    tick_idx = np.linspace(0, len(x) - 1, tick_count, dtype=int)
+    tick_idx = np.unique(tick_idx)
+
+    color_map = {
+        "true": "#1f77b4",
+        "ha_baseline": "#4c78a8",
+        "xgboost": "#f58518",
+        "lstm": "#54a24b",
+        "transformer_v1": "#e45756",
+        "transformer_v2": "#b279a2",
+    }
+
+    with plt.rc_context(
+        {
+            "font.family": "Times New Roman",
+            "font.size": 18,
+            "axes.labelsize": 20,
+            "xtick.labelsize": 16,
+            "ytick.labelsize": 16,
+            "legend.fontsize": 16,
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(11, 5), facecolor="white")
+        ax.set_facecolor("white")
+        ax.plot(x, true_series, label="true", linewidth=2.4, color=color_map["true"])
+        for name, series in series_by_model.items():
+            ax.plot(
+                x,
+                series,
+                label=name,
+                linestyle="--",
+                linewidth=2.0,
+                color=color_map.get(name),
+            )
+
+        ax.set_xlabel("time", fontname="Times New Roman")
+        ax.set_ylabel(y_label, fontname="Times New Roman")
+        ax.set_xlim(float(tick_idx[0]), float(tick_idx[-1]))
+        ax.set_xticks(tick_idx)
+        ax.set_xticklabels([labels[idx] for idx in tick_idx], rotation=0)
+        ax.set_ylim(float(y_ticks[0]), float(y_ticks[-1]))
+        ax.set_yticks(y_ticks)
+        ax.margins(x=0.0, y=0.0)
+        ax.tick_params(direction="in", length=4.0, width=0.8, colors="black")
+        for spine in ax.spines.values():
+            spine.set_color("black")
+            spine.set_linewidth(0.8)
+        ax.grid(False)
+        ax.legend(loc="upper right", frameon=False, borderaxespad=0.5)
+        fig.savefig(output_path, dpi=150, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
 
 
 def plot_incident_vs_normal(
@@ -1249,7 +1345,11 @@ def plot_subset_metric_bars(rows: list[dict[str, Any]], output_path: Path) -> No
     ]
     if not relevant:
         return
-    models = sorted({row["model"] for row in relevant})
+    preferred_order = ["ha_baseline", "xgboost", "lstm", "transformer_v1", "transformer_v2"]
+    present_models = {str(row["model"]) for row in relevant}
+    ordered_models = [model for model in preferred_order if model in present_models]
+    remaining_models = sorted(present_models - set(ordered_models))
+    models = ordered_models + remaining_models
     overall = {
         row["model"]: row["mae"]
         for row in relevant
@@ -1262,16 +1362,65 @@ def plot_subset_metric_bars(rows: list[dict[str, Any]], output_path: Path) -> No
     }
     x = np.arange(len(models))
     width = 0.35
-    plt.figure(figsize=(9, 5))
-    plt.bar(x - width / 2, [overall.get(model, 0.0) for model in models], width=width, label="overall")
-    plt.bar(x + width / 2, [incident.get(model, 0.0) for model in models], width=width, label="incident")
-    plt.xticks(x, models)
-    plt.ylabel("MAE")
-    plt.title("Overall vs Incident MAE")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
-    plt.close()
+    overall_values = [overall.get(model, 0.0) for model in models]
+    incident_values = [incident.get(model, 0.0) for model in models]
+    all_values = [*overall_values, *incident_values]
+    y_max = max(all_values) if all_values else 1.0
+    y_top = math.ceil(y_max * 10.0) / 10.0
+    if y_top <= 0:
+        y_top = 1.0
+    y_ticks = np.linspace(0.0, y_top, 5)
+    display_labels = {
+        "ha_baseline": "HA",
+        "lstm": "LSTM",
+        "xgboost": "XGBoost",
+        "transformer_v1": "Transformer V1",
+        "transformer_v2": "Transformer V2",
+    }
+
+    with plt.rc_context(
+        {
+            "font.family": "Times New Roman",
+            "font.size": 18,
+            "axes.labelsize": 20,
+            "xtick.labelsize": 16,
+            "ytick.labelsize": 16,
+            "legend.fontsize": 16,
+            "axes.unicode_minus": False,
+        }
+    ):
+        fig, ax = plt.subplots(figsize=(9, 5), facecolor="white")
+        ax.set_facecolor("white")
+        ax.bar(
+            x - width / 2,
+            overall_values,
+            width=width,
+            label="overall",
+            color="#4c78a8",
+        )
+        ax.bar(
+            x + width / 2,
+            incident_values,
+            width=width,
+            label="incident",
+            color="#f58518",
+        )
+        ax.set_ylabel("MAE", fontname="Times New Roman")
+        # Category axis: leave balanced visual padding on both sides.
+        ax.set_xlim(float(x[0] - 0.6), float(x[-1] + 0.6))
+        ax.set_xticks(x)
+        ax.set_xticklabels([display_labels.get(model, model) for model in models], rotation=0)
+        ax.set_ylim(0.0, float(y_ticks[-1]))
+        ax.set_yticks(y_ticks)
+        ax.margins(x=0.0, y=0.0)
+        ax.tick_params(direction="in", length=4.0, width=0.8, colors="black")
+        for spine in ax.spines.values():
+            spine.set_color("black")
+            spine.set_linewidth(0.8)
+        ax.grid(False)
+        ax.legend(loc="upper right", frameon=False, borderaxespad=0.5)
+        fig.savefig(output_path, dpi=150, facecolor="white", bbox_inches="tight")
+        plt.close(fig)
 
 
 def write_control_ablation_csv(path: str | Path, rows: list[dict[str, Any]]) -> None:

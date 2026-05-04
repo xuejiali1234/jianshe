@@ -44,8 +44,11 @@ def evaluate_multi_policy(
     done = False
     try:
         while not done:
-            actions = policy.act(observation, env.last_info)
-            observation, reward, done, info = env.step(actions)
+            if policy.name == "webster":
+                observation, reward, done, info = env.advance_without_control()
+            else:
+                actions = policy.act(observation, env.last_info)
+                observation, reward, done, info = env.step(actions)
             total_reward += reward
             switch_count += int(info.get("switch_count", 0))
             per_tls_queue = {

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -659,7 +659,7 @@
 
                     <div class="mode-switch">
                         <button id="predictionModeRealtime" class="mode-switch-btn active" type="button">&#23454;&#26102;&#39044;&#27979;</button>
-                        <button id="predictionModeCompare" class="mode-switch-btn" type="button">&#20107;&#25925;&#23545;&#27604;</button>
+                        <button id="predictionModeCompare" class="mode-switch-btn" type="button">事故场景推演</button>
                     </div>
 
                     <div class="control-grid">
@@ -675,11 +675,7 @@
 
                     <div id="scenarioCompareControls" class="control-grid" style="display:none;">
                         <label class="control-block">
-                            <span class="control-label">&#27491;&#24120; Run</span>
-                            <select id="baselineRunSelect" class="select-control"></select>
-                        </label>
-                        <label class="control-block">
-                            <span class="control-label">事件 Run</span>
+                            <span class="control-label">事件</span>
                             <select id="incidentRunSelect" class="select-control"></select>
                         </label>
                     </div>
@@ -738,60 +734,29 @@
                     </div>
 
                     <div id="scenarioCompareView" class="prediction-view">
-                        <div class="prediction-meta">
-                            <div class="meta-item">
-                                <span class="meta-key">&#23545;&#27604;&#27169;&#22411;</span>
-                                <span id="compareModelLabel" class="meta-value">--</span>
-                            </div>
-                            <div class="meta-item">
-                                <span class="meta-key">事件类型</span>
-                                <span id="compareIncidentType" class="meta-value">--</span>
-                            </div>
-                            <div class="meta-item">
-                                <span class="meta-key">&#23545;&#40784;&#26102;&#21051;</span>
-                                <span id="compareAnchorStep" class="meta-value">--</span>
-                            </div>
-                            <div class="meta-item">
-                                <span class="meta-key">影响路段</span>
-                                <span id="compareAffectedEdges" class="meta-value">--</span>
-                            </div>
-                        </div>
-
-                        <div id="compareIncidentNotice" class="compare-incident-notice">--</div>
-
-                        <div class="compare-delta-grid">
-                            <div class="delta-card">
-                                <span class="delta-label">&#27969;&#37327;&#24046;&#20540;</span>
-                                <span id="compareFlowDelta" class="delta-value">--</span>
-                            </div>
-                            <div class="delta-card">
-                                <span class="delta-label">&#36895;&#24230;&#24046;&#20540;</span>
-                                <span id="compareSpeedDelta" class="delta-value">--</span>
-                            </div>
-                            <div class="delta-card">
-                                <span class="delta-label">&#25490;&#38431;&#24046;&#20540;</span>
-                                <span id="compareQueueDelta" class="delta-value">--</span>
-                            </div>
+                        <div style="display:flex; gap:8px; margin:0 0 10px;">
+                            <button id="compareCreateIncidentBtn" type="button" style="flex:1; padding:7px 10px; background:rgba(70, 8, 12, 0.9); border:1px solid #ff6b6b; color:#ffd5d6; cursor:pointer; border-radius:4px; font-size:12px;">模拟事故车</button>
+                            <button id="compareResolveIncidentBtn" type="button" style="flex:1; padding:7px 10px; background:rgba(16, 38, 24, 0.9); border:1px solid #4dff88; color:#dfffea; cursor:pointer; border-radius:4px; font-size:12px;">解除事故</button>
                         </div>
 
                         <div class="prediction-mini-grid">
                             <div class="prediction-mini-card">
                                 <div class="prediction-mini-head">
-                                    <h4 class="prediction-mini-title">&#27969;&#37327;&#23545;&#27604;</h4>
+                                    <h4 class="prediction-mini-title">事件流量预测</h4>
                                     <span id="compareFlowLead" class="prediction-mini-value">--</span>
                                 </div>
                                 <div id="compareFlowChart" class="prediction-mini-chart"></div>
                             </div>
                             <div class="prediction-mini-card">
                                 <div class="prediction-mini-head">
-                                    <h4 class="prediction-mini-title">&#36895;&#24230;&#23545;&#27604;</h4>
+                                    <h4 class="prediction-mini-title">事件速度预测</h4>
                                     <span id="compareSpeedLead" class="prediction-mini-value">--</span>
                                 </div>
                                 <div id="compareSpeedChart" class="prediction-mini-chart"></div>
                             </div>
                             <div class="prediction-mini-card">
                                 <div class="prediction-mini-head">
-                                    <h4 class="prediction-mini-title">&#25490;&#38431;&#23545;&#27604;</h4>
+                                    <h4 class="prediction-mini-title">事件排队预测</h4>
                                     <span id="compareQueueLead" class="prediction-mini-value">--</span>
                                 </div>
                                 <div id="compareQueueChart" class="prediction-mini-chart"></div>
@@ -811,6 +776,6 @@
             <div id="incidentList"></div>
         </div>
     </div>
-    <script src="/static/js/main.js?v=20260428_remove_rl_panel"></script>
+    <script src="/static/js/main.js?v=20260503_incident_story_v2"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-const vClassColors = {
+﻿const vClassColors = {
     passenger: '#409eff',
     truck: '#e6a23c',
     bus: '#67c23a',
@@ -152,12 +152,32 @@ function formatLaneIds(laneIds) {
 
 function getPredictionEdgeLabel(edgeId) {
     const catalog = getMovementCatalog(edgeId);
-    if (!catalog) return edgeId;
+    const roadName = edgeMetaById?.[edgeId]?.roadName || '';
+    if (!catalog) {
+        return roadName ? `${roadName} / ${edgeId}` : edgeId;
+    }
     const laneCount = Number(catalog.lane_count || 0);
     const movementCount = Number(catalog.movement_count || 0);
     const laneLabel = laneCount > 0 ? `${laneCount}车道` : '车道未知';
     const movementLabel = movementCount > 0 ? `${movementCount}个转向检测` : '无转向检测';
-    return `${edgeId}（${laneLabel} / ${movementLabel}）`;
+    const prefix = roadName ? `${roadName} / ${edgeId}` : edgeId;
+    return `${prefix}（${laneLabel} / ${movementLabel}）`;
+}
+
+function getAllSelectableNetworkEdgeIds() {
+    return Object.keys(edgeMetaById || {})
+        .filter(edgeId => edgeId && edgeId !== 'ALL' && !String(edgeId).startsWith(':'))
+        .sort((a, b) => a.localeCompare(b, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+}
+
+function getPredictionSelectableEdgeIds() {
+    if (predictionPanelMode === 'compare') {
+        const allNetworkEdgeIds = getAllSelectableNetworkEdgeIds();
+        if (allNetworkEdgeIds.length) return allNetworkEdgeIds;
+    }
+    return Array.isArray(predictionConfigState.observedEdges)
+        ? predictionConfigState.observedEdges
+        : [];
 }
 
 function escapeHtml(text) {
@@ -345,13 +365,14 @@ const compareCharts = {
 
 const predictionModelSelectEl = document.getElementById('predictionModelSelect');
 const predictionEdgeSelectEl = document.getElementById('predictionEdgeSelect');
-const baselineRunSelectEl = document.getElementById('baselineRunSelect');
 const incidentRunSelectEl = document.getElementById('incidentRunSelect');
 const modeRealtimeBtn = document.getElementById('predictionModeRealtime');
 const modeCompareBtn = document.getElementById('predictionModeCompare');
 const realtimeViewEl = document.getElementById('realtimePredictionView');
 const compareViewEl = document.getElementById('scenarioCompareView');
 const compareControlsEl = document.getElementById('scenarioCompareControls');
+const compareCreateIncidentBtn = document.getElementById('compareCreateIncidentBtn');
+const compareResolveIncidentBtn = document.getElementById('compareResolveIncidentBtn');
 const movementSegmentSwitchEl = document.getElementById('movementSegmentSwitch');
 const movementSwitchHintEl = document.getElementById('movementSwitchHint');
 const TURN_LABELS = { l: '左转', s: '直行', r: '右转' };
@@ -374,13 +395,21 @@ let predictionConfigState = {
     movementCatalogByEdge: {}
 };
 let scenarioRunState = {
-    baselineRuns: [],
     incidentRuns: [],
+    baselineRuns: [],
     selectedBaselineRunId: '',
-    selectedIncidentRunId: ''
+    selectedIncidentRunId: '',
+    selectedIncidentEventKey: 'stopped_vehicle'
 };
 
+const INCIDENT_EVENT_OPTIONS = [
+    { key: 'stopped_vehicle', label: '模拟事故车' },
+    { key: 'closure', label: '事故封停' },
+    { key: 'vsl', label: '道路限速' }
+];
+
 let roadLanes = [];
+let edgeMetaById = {};
 let roadPolylines = [];
 let vehicleMarkers = [];
 let tlMarkers = [];
@@ -655,6 +684,71 @@ function attachGlobalScopeButton() {
     };
 }
 
+async function sendManualIncident(action, targetEdgeId = currentMonitorEdgeId) {
+    if (!targetEdgeId || targetEdgeId === 'ALL') {
+        alert('请先点击一条具体路段，再执行事故模拟。');
+        return;
+    }
+    const meta = edgeMetaById[targetEdgeId] || {};
+    const roadName = meta.roadName || targetEdgeId;
+    const eventKey = scenarioRunState.selectedIncidentEventKey || 'stopped_vehicle';
+    const createDescMap = {
+        stopped_vehicle: '正在生成事故车',
+        closure: '正在实施事故封停',
+        vsl: '正在实施道路限速',
+    };
+    const response = await fetch('/api/incidents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            road_name: roadName,
+            edge_id: targetEdgeId,
+            desc: action === 'create' ? (createDescMap[eventKey] || '正在生成事故车') : '解除事故',
+            action,
+            event_type: eventKey
+        })
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.status !== 'ok') {
+        throw new Error(payload.detail || payload.message || '事故操作失败');
+    }
+}
+
+function attachIncidentButtons() {}
+
+function attachCompareIncidentButtons() {
+    if (compareCreateIncidentBtn) {
+        compareCreateIncidentBtn.onclick = async () => {
+            try {
+                await sendManualIncident('create', selectedPredictionEdgeId);
+            } catch (error) {
+                console.error('Compare create incident failed:', error);
+                alert(error.message || '事故操作失败');
+            }
+        };
+    }
+    if (compareResolveIncidentBtn) {
+        compareResolveIncidentBtn.onclick = async () => {
+            try {
+                await sendManualIncident('resolve', selectedPredictionEdgeId);
+            } catch (error) {
+                console.error('Compare resolve incident failed:', error);
+                alert(error.message || '事故操作失败');
+            }
+        };
+    }
+}
+
+function updateCompareActionButtonLabel() {
+    if (!compareCreateIncidentBtn) return;
+    const labelMap = {
+        stopped_vehicle: '模拟事故车',
+        closure: '模拟事故封停',
+        vsl: '模拟道路限速',
+    };
+    compareCreateIncidentBtn.innerText = labelMap[scenarioRunState.selectedIncidentEventKey] || '模拟事故车';
+}
+
 function renderHeaderStatus(title) {
     const statusEl = document.getElementById('systemStatus');
     if (!statusEl) return;
@@ -675,12 +769,6 @@ function refreshRoadHighlights() {
 
     if (selectedPredictionEdgeId && selectedPredictionEdgeId !== 'ALL') {
         setEdgePolylinesStyle(selectedPredictionEdgeId, getPredictionRoadStyle());
-    }
-
-    if (predictionPanelMode === 'compare') {
-        compareAffectedEdgeIds.forEach(edgeId => {
-            setEdgePolylinesStyle(edgeId, getIncidentRoadStyle());
-        });
     }
 
     renderCompareIncidentEdgeMarkers();
@@ -715,42 +803,7 @@ function clearCompareIncidentEdgeMarkers() {
 }
 
 function renderCompareIncidentEdgeMarkers() {
-    if (!map) return;
-    if (predictionPanelMode !== 'compare' || !compareAffectedEdgeIds.length) {
-        clearCompareIncidentEdgeMarkers();
-        return;
-    }
-    const activeEdges = new Set(compareAffectedEdgeIds);
-    Object.keys(compareIncidentEdgeMarkers).forEach(edgeId => {
-        if (!activeEdges.has(edgeId)) {
-            map.remove(compareIncidentEdgeMarkers[edgeId]);
-            delete compareIncidentEdgeMarkers[edgeId];
-        }
-    });
-    const eventType = lastComparePayload?.event_type || '';
-    const speedFactor = Number(lastComparePayload?.incident_speed_factor || 0.25);
-    const factorLabel = Number.isFinite(speedFactor) ? Math.round(speedFactor * 100) : 25;
-    compareAffectedEdgeIds.forEach(edgeId => {
-        const center = getEdgePolylineCenter(edgeId);
-        if (!center) return;
-        const markerText = eventType === 'incident_closure'
-            ? '事故：封停'
-            : `限速：${factorLabel}%`;
-        const content = `<div class="compare-incident-marker">${markerText}</div>`;
-        if (!compareIncidentEdgeMarkers[edgeId]) {
-            const marker = new AMap.Marker({
-                position: center,
-                content,
-                offset: new AMap.Pixel(-44, -28),
-                zIndex: 107
-            });
-            map.add(marker);
-            compareIncidentEdgeMarkers[edgeId] = marker;
-        } else {
-            compareIncidentEdgeMarkers[edgeId].setPosition(center);
-            compareIncidentEdgeMarkers[edgeId].setContent(content);
-        }
-    });
+    clearCompareIncidentEdgeMarkers();
 }
 
 function updateSignalStopbars() {
@@ -774,9 +827,18 @@ function setPredictionPanelMode(mode) {
     if (realtimeViewEl) realtimeViewEl.classList.toggle('active', predictionPanelMode === 'realtime');
     if (compareViewEl) compareViewEl.classList.toggle('active', predictionPanelMode === 'compare');
     if (compareControlsEl) compareControlsEl.style.display = predictionPanelMode === 'compare' ? 'grid' : 'none';
+    updatePredictionEdgeOptions(getPredictionSelectableEdgeIds());
     refreshRoadHighlights();
 
     if (predictionPanelMode === 'compare') {
+        const incidentRun = getIncidentRunForEventKey(scenarioRunState.selectedIncidentEventKey);
+        const defaultAffectedEdge = getFirstSelectableAffectedEdge(incidentRun);
+        if (defaultAffectedEdge && (
+            !isPredictionEdgeSelectable(selectedPredictionEdgeId)
+            || !getIncidentRunAffectedEdges(incidentRun).includes(selectedPredictionEdgeId)
+        )) {
+            selectPredictionEdgeForCompare(defaultAffectedEdge);
+        }
         fetchScenarioRuns();
         requestScenarioCompare();
     } else if (lastRealtimePredictionData) {
@@ -786,11 +848,12 @@ function setPredictionPanelMode(mode) {
 
 function updatePredictionEdgeOptions(edgeIds) {
     if (!predictionEdgeSelectEl) return;
+    const normalizedEdgeIds = Array.isArray(edgeIds) ? edgeIds.filter(Boolean) : [];
     const previousEdgeId = selectedPredictionEdgeId;
     const currentEdgeIds = Array.from(predictionEdgeSelectEl.options).map(option => option.value);
-    if (currentEdgeIds.join('|') !== edgeIds.join('|')) {
+    if (currentEdgeIds.join('|') !== normalizedEdgeIds.join('|')) {
         predictionEdgeSelectEl.innerHTML = '';
-        edgeIds.forEach(edgeId => {
+        normalizedEdgeIds.forEach(edgeId => {
             const option = document.createElement('option');
             option.value = edgeId;
             option.textContent = edgeId;
@@ -800,8 +863,8 @@ function updatePredictionEdgeOptions(edgeIds) {
     Array.from(predictionEdgeSelectEl.options).forEach(option => {
         option.textContent = getPredictionEdgeLabel(option.value);
     });
-    if (!selectedPredictionEdgeId || !edgeIds.includes(selectedPredictionEdgeId)) {
-        selectedPredictionEdgeId = edgeIds[0] || null;
+    if (!selectedPredictionEdgeId || !normalizedEdgeIds.includes(selectedPredictionEdgeId)) {
+        selectedPredictionEdgeId = normalizedEdgeIds[0] || null;
     }
     if (selectedPredictionEdgeId !== previousEdgeId) {
         selectedMovementSegmentId = 'aggregate';
@@ -831,6 +894,32 @@ function getFirstSelectableAffectedEdge(run) {
     return affectedEdges.find(edgeId => selectableEdges.has(edgeId)) || affectedEdges[0];
 }
 
+function getPreferredIncidentRun(candidates, preferMainline = true) {
+    if (!Array.isArray(candidates) || !candidates.length) return null;
+    const scored = candidates.map(run => {
+        const runId = String(run.run_id || '');
+        let score = 0;
+        if (preferMainline && /mainline/i.test(runId)) score += 20;
+        if (/scale_1p30/i.test(runId)) score += 10;
+        if (/seed_11/i.test(runId)) score += 5;
+        return { run, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0]?.run || candidates[0];
+}
+
+function getIncidentRunForEventKey(eventKey) {
+    const runs = scenarioRunState.incidentRuns || [];
+    if (!runs.length) return null;
+    if (eventKey === 'vsl') {
+        return getPreferredIncidentRun(runs.filter(run => String(run.event_type || '') === 'vsl_speed_drop'));
+    }
+    if (eventKey === 'closure') {
+        return getPreferredIncidentRun(runs.filter(run => String(run.event_type || '') === 'incident_closure'));
+    }
+    return getPreferredIncidentRun(runs.filter(run => String(run.event_type || '') === 'incident_closure'));
+}
+
 function selectPredictionEdgeForCompare(edgeId) {
     if (!edgeId) return;
     selectedPredictionEdgeId = edgeId;
@@ -851,9 +940,9 @@ function applyPredictionConfig(payload) {
     const configEdges = Array.isArray(payload.config?.observed_edges) ? payload.config.observed_edges : [];
     predictionConfigState.observedEdges = configEdges;
     if (configEdges.length) {
-        updatePredictionEdgeOptions(configEdges);
+        updatePredictionEdgeOptions(getPredictionSelectableEdgeIds());
         if (predictionPanelMode === 'compare') {
-            const incidentRun = scenarioRunState.incidentRuns.find(run => run.run_id === scenarioRunState.selectedIncidentRunId);
+            const incidentRun = getIncidentRunForEventKey(scenarioRunState.selectedIncidentEventKey);
             const defaultAffectedEdge = getFirstSelectableAffectedEdge(incidentRun);
             if (defaultAffectedEdge && (
                 !isPredictionEdgeSelectable(selectedPredictionEdgeId)
@@ -881,10 +970,8 @@ function applyPredictionConfig(payload) {
 
     const activeModelEl = document.getElementById('predictionActiveModel');
     const activeBadgeEl = document.getElementById('predictionActiveBadge');
-    const compareModelEl = document.getElementById('compareModelLabel');
     if (activeModelEl) activeModelEl.innerText = formatModelName(predictionConfigState.activeModel);
     if (activeBadgeEl) activeBadgeEl.innerText = formatModelName(predictionConfigState.activeModel);
-    if (compareModelEl) compareModelEl.innerText = formatModelName(predictionConfigState.activeModel);
 }
 
 async function fetchPredictionConfig() {
@@ -913,30 +1000,19 @@ async function fetchScenarioRuns() {
 }
 
 function populateScenarioRunSelectors(payload) {
-    scenarioRunState.baselineRuns = Array.isArray(payload.baseline_runs) ? payload.baseline_runs : [];
     scenarioRunState.incidentRuns = Array.isArray(payload.incident_runs) ? payload.incident_runs : [];
-
-    if (baselineRunSelectEl) {
-        baselineRunSelectEl.innerHTML = '';
-        scenarioRunState.baselineRuns.forEach(run => {
-            const option = document.createElement('option');
-            option.value = run.run_id;
-            option.textContent = `${run.run_id} (x${Number(run.demand_scale).toFixed(2)})`;
-            baselineRunSelectEl.appendChild(option);
-        });
-    }
+    scenarioRunState.baselineRuns = Array.isArray(payload.baseline_runs) ? payload.baseline_runs : [];
     if (incidentRunSelectEl) {
         incidentRunSelectEl.innerHTML = '';
-        scenarioRunState.incidentRuns.forEach(run => {
+        INCIDENT_EVENT_OPTIONS.forEach(item => {
             const option = document.createElement('option');
-            option.value = run.run_id;
-            option.textContent = `${run.run_id} (${formatEventType(run.event_type, run.incident_type)})`;
+            option.value = item.key;
+            option.textContent = item.label;
             incidentRunSelectEl.appendChild(option);
         });
     }
 
-    const incidentRun = scenarioRunState.incidentRuns.find(run => run.run_id === scenarioRunState.selectedIncidentRunId)
-        || scenarioRunState.incidentRuns[0];
+    const incidentRun = getIncidentRunForEventKey(scenarioRunState.selectedIncidentEventKey);
     scenarioRunState.selectedIncidentRunId = incidentRun ? incidentRun.run_id : '';
     const defaultAffectedEdge = getFirstSelectableAffectedEdge(incidentRun);
     if (defaultAffectedEdge && (
@@ -953,8 +1029,8 @@ function populateScenarioRunSelectors(payload) {
         ? requestedBaselineRunId
         : (scenarioRunState.baselineRuns[0]?.run_id || '');
 
-    if (incidentRunSelectEl) incidentRunSelectEl.value = scenarioRunState.selectedIncidentRunId;
-    if (baselineRunSelectEl) baselineRunSelectEl.value = scenarioRunState.selectedBaselineRunId;
+    if (incidentRunSelectEl) incidentRunSelectEl.value = scenarioRunState.selectedIncidentEventKey;
+    updateCompareActionButtonLabel();
 
     if (predictionPanelMode === 'compare') {
         requestScenarioCompare();
@@ -1126,7 +1202,9 @@ function getSelectedPredictionSeries(prediction, node, edgeId) {
 function updateRealtimePredictionPanel(prediction) {
     if (!prediction || !prediction.nodes || !prediction.nodes.length) return;
     lastRealtimePredictionData = prediction;
-    updatePredictionEdgeOptions(prediction.nodes.map(node => node.edge_id));
+    if (predictionPanelMode === 'realtime') {
+        updatePredictionEdgeOptions(prediction.nodes.map(node => node.edge_id));
+    }
 
     const node = prediction.nodes.find(item => item.edge_id === selectedPredictionEdgeId) || prediction.nodes[0];
     if (node && selectedPredictionEdgeId !== node.edge_id) {
@@ -1176,70 +1254,25 @@ function updateRealtimePredictionPanel(prediction) {
 }
 
 function updateScenarioComparePanel(payload) {
-    if (!payload || !payload.baseline_pred || !payload.incident_pred) return;
+    if (!payload || !payload.incident_pred) return;
     lastComparePayload = payload;
     compareAffectedEdgeIds = Array.isArray(payload.affected_edges) ? payload.affected_edges : [];
-    updatePredictionEdgeOptions(payload.baseline_pred.nodes.map(node => node.edge_id));
+    updatePredictionEdgeOptions(getPredictionSelectableEdgeIds());
 
-    const baselineNode = payload.baseline_pred.nodes.find(node => node.edge_id === selectedPredictionEdgeId) || payload.baseline_pred.nodes[0];
     const incidentNode = payload.incident_pred.nodes.find(node => node.edge_id === selectedPredictionEdgeId) || payload.incident_pred.nodes[0];
-    const delta = payload.delta || {};
-    const labels = (payload.baseline_pred.horizon || []).map(step => `+${step}m`);
+    const labels = (payload.incident_pred.horizon || []).map(step => `+${step}m`);
 
-    const flowNormal = (baselineNode.pred_flow || []).map(Number);
     const flowIncident = (incidentNode.pred_flow || []).map(Number);
-    const speedNormal = (baselineNode.pred_speed || []).map(value => Number(value) * 3.6);
     const speedIncident = (incidentNode.pred_speed || []).map(value => Number(value) * 3.6);
-    const queueNormal = (baselineNode.pred_queue || []).map(Number);
     const queueIncident = (incidentNode.pred_queue || []).map(Number);
-    const selectedIsDirectAffected = compareAffectedEdgeIds.includes(selectedPredictionEdgeId);
-    const incidentStart = Number(payload.incident_start_s ?? payload.anchor_step ?? 0);
-    const incidentEnd = Number(payload.incident_end_s ?? 0);
-    const incidentSpeedFactor = Number(payload.incident_speed_factor || 0.25);
-    const eventType = payload.event_type || '';
-    const speedFactorLabel = Number.isFinite(incidentSpeedFactor) ? Math.round(incidentSpeedFactor * 100) : 25;
-    const noticeEl = document.getElementById('compareIncidentNotice');
-    const eventLabel = formatEventType(eventType, payload.incident_type);
-    const eventActionText = eventType === 'incident_closure'
-        ? `禁止 passenger 车辆进入影响路段`
-        : `最大速度降至基础速度的 ${speedFactorLabel}%`;
 
-    document.getElementById('compareModelLabel').innerText = formatModelName(payload.model_name || predictionConfigState.activeModel);
-    document.getElementById('compareIncidentType').innerText = eventLabel !== '--'
-        ? `${eventLabel} / ${eventType === 'incident_closure' ? '封停' : `限速${speedFactorLabel}%`}`
-        : '--';
-    document.getElementById('compareAnchorStep').innerText = incidentEnd > incidentStart
-        ? `${incidentStart}s - ${incidentEnd}s`
-        : `${payload.anchor_step || 0}s`;
-    document.getElementById('compareAffectedEdges').innerText = compareAffectedEdgeIds.length
-        ? `${compareAffectedEdgeIds.join(', ')}（红色虚线）`
-        : '--';
-    if (noticeEl) {
-        noticeEl.classList.toggle('indirect', !selectedIsDirectAffected);
-        const affectedText = compareAffectedEdgeIds.length ? compareAffectedEdgeIds.join(', ') : '--';
-        noticeEl.innerText = selectedIsDirectAffected
-            ? `当前查看的是事件直接影响路段 ${selectedPredictionEdgeId}。${eventLabel}：${incidentStart}s-${incidentEnd}s 内，${affectedText} ${eventActionText}。`
-            : `当前查看的 ${selectedPredictionEdgeId} 不是事件直接影响路段，曲线主要表示外溢影响。直接影响路段为 ${affectedText}，事件窗口 ${incidentStart}s-${incidentEnd}s，处理方式：${eventActionText}。`;
-    }
-    document.getElementById('compareFlowDelta').innerText = formatSignedValue((delta.delta_flow || [])[0], 2);
-    document.getElementById('compareSpeedDelta').innerText = formatSignedValue(((delta.delta_speed || [])[0] || 0) * 3.6, 2, ' km/h');
-    document.getElementById('compareQueueDelta').innerText = formatSignedValue((delta.delta_queue || [])[0], 2);
-    document.getElementById('compareFlowLead').innerText = `常 ${formatPredictionValue(flowNormal[0])} / 事 ${formatPredictionValue(flowIncident[0])}`;
-    document.getElementById('compareSpeedLead').innerText = `常 ${formatPredictionValue(speedNormal[0])} / 事 ${formatPredictionValue(speedIncident[0])}`;
-    document.getElementById('compareQueueLead').innerText = `常 ${formatPredictionValue(queueNormal[0])} / 事 ${formatPredictionValue(queueIncident[0])}`;
+    document.getElementById('compareFlowLead').innerText = formatPredictionValue(flowIncident[0]);
+    document.getElementById('compareSpeedLead').innerText = `${formatPredictionValue(speedIncident[0])} km/h`;
+    document.getElementById('compareQueueLead').innerText = formatPredictionValue(queueIncident[0]);
 
-    const flowSeries = [
-        { color: compareSeriesFlow[0].color, data: flowNormal },
-        { color: compareSeriesFlow[1].color, data: flowIncident }
-    ];
-    const speedSeries = [
-        { color: compareSeriesSpeed[0].color, data: speedNormal },
-        { color: compareSeriesSpeed[1].color, data: speedIncident }
-    ];
-    const queueSeries = [
-        { color: compareSeriesQueue[0].color, data: queueNormal },
-        { color: compareSeriesQueue[1].color, data: queueIncident }
-    ];
+    const flowSeries = [{ color: compareSeriesFlow[1].color, data: flowIncident }];
+    const speedSeries = [{ color: compareSeriesSpeed[1].color, data: speedIncident }];
+    const queueSeries = [{ color: compareSeriesQueue[1].color, data: queueIncident }];
 
     if (compareCharts.flow) setLineChart(compareCharts.flow, labels, flowSeries);
     else setLineChartFallback(compareChartEls.flow, labels, flowSeries);
@@ -1522,26 +1555,36 @@ function loadNetworkToMap() {
             signalStopbarPolylines = [];
 
             roadLanes = data.lanes || [];
+            edgeMetaById = {};
             let sumLon = 0;
             let sumLat = 0;
             let pointCount = 0;
 
             roadLanes.forEach(lane => {
+                if (!edgeMetaById[lane.edgeId]) {
+                    edgeMetaById[lane.edgeId] = {
+                        roadName: lane.roadName || ''
+                    };
+                }
                 if (lane.shape && lane.shape.length >= 2) {
                     const path = lane.shape.map(point => new AMap.LngLat(point[0], point[1]));
                     const polyline = new AMap.Polyline({
                         path,
                         bubble: true,
                         cursor: 'pointer',
-                        extData: { edgeId: lane.edgeId },
+                        extData: { edgeId: lane.edgeId, roadName: lane.roadName || '' },
                         ...getBaseRoadStyle()
                     });
 
                     polyline.on('click', event => {
-                        currentMonitorEdgeId = event.target.getExtData().edgeId;
+                        const extData = event.target.getExtData() || {};
+                        currentMonitorEdgeId = extData.edgeId;
                         const labelEl = document.getElementById('currentEdgeLabel');
                         if (labelEl) {
-                            labelEl.innerHTML = `${I18N.edgeLabel}<span style="color:#ff9900">${currentMonitorEdgeId}</span>`;
+                            const roadLabel = extData.roadName
+                                ? `${extData.roadName} / ${currentMonitorEdgeId}`
+                                : currentMonitorEdgeId;
+                            labelEl.innerHTML = `${I18N.edgeLabel}<span style="color:#ff9900">${roadLabel}</span>`;
                         }
                         if (window.appWs && window.appWs.readyState === WebSocket.OPEN) {
                             window.appWs.send(JSON.stringify({ action: 'set_edge', edgeId: currentMonitorEdgeId }));
@@ -1592,6 +1635,10 @@ function loadNetworkToMap() {
             });
             updateSignalStopbars();
 
+            if (predictionPanelMode === 'compare') {
+                updatePredictionEdgeOptions(getPredictionSelectableEdgeIds());
+            }
+
             if (pointCount > 0) {
                 map.setCenter([sumLon / pointCount, sumLat / pointCount]);
                 map.setZoom(16);
@@ -1620,22 +1667,16 @@ if (predictionEdgeSelectEl) {
     };
 }
 
-if (baselineRunSelectEl) {
-    baselineRunSelectEl.onchange = () => {
-        scenarioRunState.selectedBaselineRunId = baselineRunSelectEl.value;
-        requestScenarioCompare();
-    };
-}
-
 if (incidentRunSelectEl) {
     incidentRunSelectEl.onchange = () => {
-        scenarioRunState.selectedIncidentRunId = incidentRunSelectEl.value;
-        const selectedIncident = scenarioRunState.incidentRuns.find(run => run.run_id === incidentRunSelectEl.value);
+        scenarioRunState.selectedIncidentEventKey = incidentRunSelectEl.value || 'stopped_vehicle';
+        const selectedIncident = getIncidentRunForEventKey(scenarioRunState.selectedIncidentEventKey);
+        scenarioRunState.selectedIncidentRunId = selectedIncident?.run_id || '';
         selectPredictionEdgeForCompare(getFirstSelectableAffectedEdge(selectedIncident));
         if (selectedIncident?.recommended_baseline_run_id) {
             scenarioRunState.selectedBaselineRunId = selectedIncident.recommended_baseline_run_id;
-            if (baselineRunSelectEl) baselineRunSelectEl.value = scenarioRunState.selectedBaselineRunId;
         }
+        updateCompareActionButtonLabel();
         requestScenarioCompare();
     };
 }
@@ -1644,6 +1685,8 @@ if (modeRealtimeBtn) modeRealtimeBtn.onclick = () => setPredictionPanelMode('rea
 if (modeCompareBtn) modeCompareBtn.onclick = () => setPredictionPanelMode('compare');
 
 renderHeaderStatus(I18N.titleDefault);
+attachCompareIncidentButtons();
+updateCompareActionButtonLabel();
 connectWS();
 if (map) {
     map.on('complete', () => loadNetworkToMap());
