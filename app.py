@@ -32,6 +32,7 @@ from prediction import (
     PredictionService,
     load_prediction_config,
 )
+from realdata import RealDataAdapter, RealDataStore, RealTrafficSnapshotRequest
 
 app = FastAPI(title="SUMO 城市交通预测看板")
 
@@ -91,6 +92,11 @@ edge_collector = MovementRealtimeCollector(
     project_root=PROJECT_ROOT,
     net_file=runtime_net_file,
 )
+real_data_adapter = RealDataAdapter(
+    PROJECT_ROOT,
+    PROJECT_ROOT / "configs" / "real_data_config.json",
+)
+real_data_store = RealDataStore(maxlen=120)
 validate_prediction_runtime(
     PROJECT_ROOT,
     runtime_net_file,
@@ -672,6 +678,42 @@ async def handle_manual_incident(req: IncidentRequest):
 async def get_prediction_config():
     return prediction_service.config_payload()
 
+@app.get("/api/realdata/config")
+async def get_realdata_config():
+    return real_data_adapter.config_payload()
+
+@app.get("/api/realdata/latest")
+async def get_realdata_latest():
+    return real_data_store.latest_payload()
+
+@app.post("/api/realdata/snapshot")
+async def post_realdata_snapshot(req: RealTrafficSnapshotRequest):
+    if not real_data_adapter.config.get("enabled", True):
+        raise HTTPException(status_code=503, detail="RealData ingestion is disabled")
+    try:
+        snapshot = real_data_adapter.build_snapshot(req)
+        real_data_store.update(snapshot)
+        use_for_prediction = bool(real_data_adapter.config.get("use_for_prediction", False))
+        if use_for_prediction:
+            prediction_service.update_observation(snapshot)
+        return {
+            "status": "ok",
+            "message": "real traffic snapshot accepted",
+            "movement_count": len(snapshot.get("movements", [])),
+            "node_count": len(snapshot.get("nodes", [])),
+            "records_received": snapshot.get("records_received", 0),
+            "records_ignored": snapshot.get("records_ignored", 0),
+            "use_for_prediction": use_for_prediction,
+            "prediction_model": prediction_service.active_model,
+            "fallback_used": bool(prediction_service.latest_prediction.get("fallback_used", False)),
+            "timestamp": snapshot.get("timestamp"),
+            "step": snapshot.get("step"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 @app.get("/api/prediction/latest")
 async def get_latest_prediction():
     return prediction_service.latest_payload()
@@ -962,6 +1004,8 @@ async def sumo_simulation_task():
                 "tls": tl_data,
                 "incidents": list(active_incidents.values()),
                 "prediction": prediction_service.latest_prediction,
+                "real_data": real_data_store.latest_payload(),
+                "data_source": "sumo_with_realdata_overlay",
             }
             
             if connected_clients:

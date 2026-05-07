@@ -1,0 +1,21 @@
+{
+  "source": "camera_demo",
+  "timestamp": "2026-05-10T10:00:00",
+  "step": 1,
+  "records": [
+    {
+      "movement_id": "12254692358__158074689_2__s__158074689_1",
+      "arrival_flow": 12,
+      "discharge_flow": 10,
+      "mean_speed_mps": 7.5,
+      "queue_veh": 4,
+      "queue_meter": 32.0,
+      "occupancy": 0.25,
+      "incident_flag": 0,
+      "phase_id": 2,
+      "phase_elapsed_s": 18.0,
+      "green_remaining_s": 12.0,
+      "signal_state": "rrGGrr"
+    }
+  ]
+}

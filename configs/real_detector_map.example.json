@@ -1,0 +1,24 @@
+{
+  "camera_west_001": {
+    "movement_id": "12254692358__158074689_2__s__158074689_1",
+    "tls_id": "12254692358",
+    "incoming_edge": "-158074689#2",
+    "outgoing_edge": "-158074689#1",
+    "turn_type": "s",
+    "lane_ids": [
+      "-158074689#2_0"
+    ]
+  },
+  "radar_west_001": {
+    "movement_id": "J42__E31_70__s__E26",
+    "tls_id": "J42",
+    "incoming_edge": "E31.70",
+    "outgoing_edge": "E26",
+    "turn_type": "s",
+    "lane_ids": [
+      "E31.70_1",
+      "E31.70_2",
+      "E31.70_3"
+    ]
+  }
+}

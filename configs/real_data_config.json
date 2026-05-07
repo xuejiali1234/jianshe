@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "use_for_prediction": false,
+  "sample_interval_s": 60,
+  "mode": "api",
+  "write_csv": true,
+  "csv_path": "data/real/realtime_realdata_snapshots.csv",
+  "movement_config_file": "configs/movement_config.json",
+  "detector_map_file": "configs/real_detector_map.example.json",
+  "fill_missing_movements": true,
+  "missing_fill_policy": "last_or_zero"
+}
